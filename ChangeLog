@@ -1,0 +1,3 @@
+# 2025-11-03 [version 1.0.0]: naver/arcus-python-client a1e66e8
+## 🐣 New Features
+  - Use scram auth in do_arcus_command
