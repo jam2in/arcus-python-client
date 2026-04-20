@@ -26,6 +26,7 @@ from kazoo.client import KazooClient
 import kazoo
 from kazoo.exceptions import *
 
+from scramp import ScramClient
 
 class arcus_cache:
 	def __init__(self, zk_addr, code):
@@ -41,13 +42,58 @@ class arcus_cache:
 		return repr
 
 
+def _authenticate(tn, username, password, timeout=0.2):
+	tn.write(bytes('sasl mech\r\n', 'utf-8'))
+	result = tn.read_until(bytes('\r\n', 'utf-8'), timeout)
+	result = result.decode('utf-8')
+	if not result.startswith("SASL_MECH"):
+		return True, "SASL_OK authentication is skipped"
+	if 'SCRAM-SHA-256' not in result:
+		return False, "AUTH_ERROR no mechanism available"
+
+	mechanism = 'SCRAM-SHA-256'
+	scram_client = ScramClient(['SCRAM-SHA-256'], username, password)
+
+	message = scram_client.get_client_first()
+	command = f'sasl auth {mechanism} {len(message)}\r\n{message}\r\n'
+	tn.write(bytes(command, 'utf-8'))
+
+	is_server_first = True
+	while True:
+		result = tn.read_until(bytes('\r\n', 'utf-8'), timeout)
+		result = result.decode('utf-8')
+
+		if result.startswith('SASL_OK'):
+			return True, result
+
+		elif result.startswith('SASL_CONTINUE'):
+			server_message = tn.read_until(bytes('\r\n', 'utf-8'), timeout)
+			server_message = server_message.decode('utf-8')[:-2]
+
+			if is_server_first:
+				is_server_first = False
+				scram_client.set_server_first(server_message)
+				message = scram_client.get_client_final()
+			else:
+				scram_client.set_server_final(server_message)
+				message = ''
+
+			command = f'sasl auth {len(message)}\r\n{message}\r\n'
+			tn.write(bytes(command, 'utf-8'))
+
+		else:
+			return False, result
+
+
 class arcus_node:
-	def __init__(self, ip, port):
+	def __init__(self, ip, port, auth_user='', auth_pass=''):
 		self.ip = ip
 		self.port = port 
 
 		self.name = ''
 		self.code = ''
+		self.auth_user = auth_user
+		self.auth_pass = auth_pass
 		self.zk_addr = ''
 		self.active = False
 
@@ -65,6 +111,12 @@ class arcus_node:
 
 	def do_arcus_command(self, command, timeout=0.2):
 		tn = telnetlib.Telnet(self.ip, self.port)
+
+		if self.auth_user:
+			ok, result = _authenticate(tn, self.auth_user, self.auth_pass, timeout)
+			if not ok:
+				return result
+
 		tn.write(bytes(command + '\r\n', 'utf-8'))
 
 		if command[0:5] == 'scrub' or command[0:5] == 'flush':
