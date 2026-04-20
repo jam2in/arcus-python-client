@@ -276,6 +276,28 @@ class ArcusPoint:
 
 
 
+class ArcusReplicaGroup:
+	def __init__(self, group_name):
+		self.group_name = group_name
+		self.master_node = None   # ArcusMCNode
+		self.slave_node = None    # ArcusMCNode
+		self.in_use = False
+
+	def get_master(self):
+		return self.master_node
+
+	def get_slave(self):
+		return self.slave_node if self.slave_node else self.master_node
+
+	def __repr__(self):
+		return '<ArcusReplicaGroup[%s] M=%s S=%s>' % (
+			self.group_name,
+			self.master_node.addr if self.master_node else None,
+			self.slave_node.addr if self.slave_node else None,
+		)
+
+
+
 class ArcusLocator:
 	def __init__(self, node_allocator):
 		# config 
@@ -285,15 +307,20 @@ class ArcusLocator:
 		self.lock = Lock()
 		self.node_list = []
 		self.addr_node_map = {}
+		self.group_map = {}
 		self.node_allocator = node_allocator
 
-	def connect(self, addr, code):
+	def connect(self, addr, code, cluster_type='community'):
 		# init zookeeper
 		arcuslog(self, 'zoo keeper init')
 		self.zk = KazooClient(hosts=addr)
 		self.zk.start()
 
-		self.zoo_path = '/arcus/cache_list/' + code
+		if cluster_type == 'enterprise':
+			self.zoo_path = '/arcus_repl/cache_list/' + code
+		else:
+			self.zoo_path = '/arcus/cache_list/' + code
+
 		arcuslog (self, 'zoo keeper get path: ' + self.zoo_path)
 		data, stat = self.zk.get(self.zoo_path)
 		arcuslog (self, 'zoo keeper node info with stat: ', data, stat)
@@ -306,57 +333,87 @@ class ArcusLocator:
 			node.disconnect_all()
 
 		self.addr_node_map = {}
+		self.group_map = {}
 		self.node_list = []
 		self.zk.stop()
 		self.node_allocator.join()
 
 	def hash_nodes(self, children):
-		#print ('hash_nodes with children %d' % len(children))
-		arcuslog (self, 'hash_nodes with children: ', children)
+		arcuslog(self, 'hash_nodes with children: ', children)
 
 		self.lock.acquire()
- 
+
 		# clear first
 		self.node_list = []
 		for node in self.addr_node_map.values():
 			node.in_use = False
-			
+		for group in self.group_map.values():
+			group.in_use = False
+
 		# update live nodes
 		for child in children:
-			lst = child.split('-')
-			addr, name = lst[:2]
-
-			if addr in self.addr_node_map:
-				self.addr_node_map[addr].in_use = True
-				node = self.addr_node_map[addr]
+			if '^' in child:
+				# enterprise format: <group_name>^<role>^<ip:port>[-hostname]
+				parts = child.split('^')
+				group_name = parts[0]
+				role = parts[1]          # 'M' or 'S'
+				addr = parts[2].split('-')[0]
 			else:
-				# new node
-				node = self.node_allocator.alloc(addr, name)
+				# community format: <ip:port>[-hostname]
+				lst = child.split('-')
+				addr = lst[0]
+				group_name = None
+				role = None
+
+			# allocate node (connection management)
+			if addr not in self.addr_node_map:
+				node = self.node_allocator.alloc(addr, child)
 				self.addr_node_map[addr] = node
-				self.addr_node_map[addr].in_use = True
+			node = self.addr_node_map[addr]
+			node.in_use = True
 
-			hash_list = self.hash_method.hash(node.addr)
-			arcuslog(self, 'hash_lists of node(%s): %s' % (node.addr, hash_list))
+			if group_name:
+				# Enterprise: assign node to replica group
+				# hash points are generated per group below
+				if group_name not in self.group_map:
+					self.group_map[group_name] = ArcusReplicaGroup(group_name)
+				group = self.group_map[group_name]
+				group.in_use = True
+				if role == 'M':
+					group.master_node = node
+				else:
+					group.slave_node = node
+			else:
+				# Community: hash directly by ip:port (unchanged behavior)
+				hash_list = self.hash_method.hash(addr)
+				arcuslog(self, 'hash_lists of node(%s): %s' % (addr, hash_list))
+				for h in hash_list:
+					self.node_list.append(ArcusPoint(h, node))
 
-			for hash in hash_list:
-				point = ArcusPoint(hash, node)
-				self.node_list.append(point)
+		# Enterprise: generate hash points per group name
+		for group_name, group in self.group_map.items():
+			if group.in_use:
+				hash_list = self.hash_method.hash(group_name)
+				arcuslog(self, 'hash_lists of group(%s): %s' % (group_name, hash_list))
+				for h in hash_list:
+					self.node_list.append(ArcusPoint(h, group))
 
 		# sort list
 		self.node_list.sort()
 		arcuslog(self, 'sorted node list', self.node_list)
 
-		# disconnect dead node
-		dead_list = []
-		for addr, node in self.addr_node_map.items():
-			if node.in_use == False:
-				dead_list.append(node)
+		# disconnect dead nodes
+		dead_addrs = [a for a, n in self.addr_node_map.items() if not n.in_use]
+		for addr in dead_addrs:
+			arcuslog(self, 'disconnect node(%s)' % addr)
+			self.addr_node_map[addr].disconnect()
+			del self.addr_node_map[addr]
 
-		for node in dead_list:
-			arcuslog(self, 'disconnect node(%s)' % node.addr)
-			node.disconnect()
-			del self.addr_node_map[node.addr]
-		
+		# remove dead groups
+		dead_groups = [g for g, grp in self.group_map.items() if not grp.in_use]
+		for g in dead_groups:
+			del self.group_map[g]
+
 		self.lock.release()
 
 	def watch_children(self, event):
@@ -379,7 +436,10 @@ class ArcusLocator:
 		point = self.node_list[idx]
 		self.lock.release()
 
-		return point.node
+		node = point.node
+		if isinstance(node, ArcusReplicaGroup):
+			return node.get_master()
+		return node
 
 	def __hash_key(self, key):
 		bkey = bytes(key, 'utf-8')
@@ -395,8 +455,8 @@ class Arcus:
 	def __init__(self, locator):
 		self.locator = locator
 
-	def connect(self, addr, code):
-		self.locator.connect(addr, code)
+	def connect(self, addr, code, cluster_type='community'):
+		self.locator.connect(addr, code, cluster_type)
 
 	def disconnect(self):
 		self.locator.disconnect()
@@ -444,6 +504,10 @@ class Arcus:
 	def cas(self, key, val, cas_id, exptime=0):
 		node = self.locator.get_node(key)
 		return node.cas(key, val, cas_id, time)
+
+	def getattr(self, key):
+		node = self.locator.get_node(key)
+		return node.getattr(key)
 
 	def lop_create(self, key, flags, exptime=0, noreply=False, attr_map=None):
 		node = self.locator.get_node(key)
@@ -565,7 +629,6 @@ class Arcus:
 
 	def set_get(self, key, cache_time=0):
 		return  ArcusSet(self, key, cache_time)
-		
 
 
 class ArcusOperation:
@@ -602,7 +665,7 @@ class ArcusOperation:
 			return self.result
 
 		if timeout > 0:
-			result = self.q.get(False, timeout)
+			result = self.q.get(True, timeout)
 		else:
 			result = self.q.get()
 

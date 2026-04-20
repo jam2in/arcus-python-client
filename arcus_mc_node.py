@@ -24,13 +24,17 @@ import re
 import threading
 from threading import Lock
 import select
+import selectors
 
 from arcus import *
+from scramp import ScramClient
 
 
 # Some parts of Connection and ArcusMCNode is came from python memcache module
 class Connection(object):
-	def __init__(self, host):
+	def __init__(self, host, auth_user='', auth_pass=''):
+		self.auth_user = auth_user
+		self.auth_pass = auth_pass
 		ip, port = host.split(':')
 		self.ip = ip
 		self.port = int(port)
@@ -54,7 +58,43 @@ class Connection(object):
 			self.disconnect()
 
 		self.buffer = b''
+
+		if hasattr(self, 'auth_user') and self.auth_user:
+			self._sasl_scram_auth()
+
 		return self.socket
+
+	def _sasl_scram_auth(self):
+		self.send_request(b'sasl mech')
+		result = self.readline().decode('utf-8')
+		if not result.startswith("SASL_MECH"): return
+		if "SCRAM-SHA-256" not in result: raise Exception("AUTH_ERROR no SCRAM-SHA-256 mechanism available")
+
+		mechanism = 'SCRAM-SHA-256'
+		scram_client = ScramClient(['SCRAM-SHA-256'], self.auth_user, self.auth_pass)
+		message = scram_client.get_client_first()
+		command = f'sasl auth {mechanism} {len(message)}\r\n{message}'
+		self.send_request(bytes(command, 'utf-8'))
+
+		is_server_first = True
+		while True:
+			result = self.readline().decode('utf-8')
+			if result.startswith('SASL_OK'):
+				break
+			elif result.startswith('SASL_CONTINUE'):
+				server_message = self.readline().decode('utf-8')
+				if is_server_first:
+					is_server_first = False
+					scram_client.set_server_first(server_message)
+					message = scram_client.get_client_final()
+				else:
+					scram_client.set_server_final(server_message)
+					message = ''
+				
+				command = f'sasl auth {len(message)}\r\n{message}'
+				self.send_request(bytes(command, 'utf-8'))
+			else:
+				raise Exception("Auth failed: " + result)
 
 	def disconnect(self):
 		if self.socket:
@@ -83,7 +123,7 @@ class Connection(object):
 			data = self.socket.recv(4096)
 			arcuslog(self, 'sock recv: (%d): "' % len(data), data)
 
-			if data == None:
+			if not data:  # None 또는 b'' (연결 종료) 모두 처리
 				self.disconnect()
 				raise ArcusNodeConnectionException('connection lost')
 
@@ -110,22 +150,34 @@ class Connection(object):
 		return buf[:rlen]
 
 
+class ArcusMCNodeAllocator:
+	worker = None
+	shutdown = False
+
+	def __init__(self, transcoder, auth_user='', auth_pass=''):
+		self.transcoder = transcoder
+		self.auth_user = auth_user
+		self.auth_pass = auth_pass
+
 class ArcusMCNode:
 	worker = None
 	shutdown = False
 
-	def __init__(self, addr, name, transcoder, node_allocator):
+	def __init__(self, addr, name, transcoder, node_allocator, auth_user='', auth_pass=''):
 		#mandatory files
 		self.addr = addr
 		self.name = name
 		self.in_use = False
 		self.transcoder = transcoder
 
-		self.handle = Connection(addr)
+		self.handle = Connection(addr, auth_user, auth_pass)
 		self.ops = []
 		self.lock = Lock() # for ordering worker.q and ops
 
 		self.node_allocator = node_allocator
+
+		if auth_user:
+			self._do_sasl_auth(auth_user, auth_pass)
 
 	def __repr__(self):
 		return '%s-%s' % (self.addr, self.name)
@@ -159,6 +211,52 @@ class ArcusMCNode:
 		self.handle.send_request(request)
 
 
+	def _do_sasl_auth(self, auth_user, auth_pass):
+		try:
+			from scramp import ScramClient
+		except ImportError:
+			raise RuntimeError('scramp package required for SASL auth: pip install scramp')
+
+		sock = self.handle.socket
+
+		def raw_send(data):
+			sock.sendall(data if isinstance(data, bytes) else data.encode('utf-8'))
+
+		def raw_readline():
+			buf = b''
+			while True:
+				ch = sock.recv(1)
+				if not ch:
+					break
+				buf += ch
+				if buf.endswith(b'\r\n'):
+					return buf.decode('utf-8').rstrip('\r\n')
+			return buf.decode('utf-8').rstrip('\r\n')
+
+		raw_send(b'sasl mech\r\n')
+		mech_line = raw_readline()
+
+		if not mech_line.startswith('SASL_MECH'):
+			return  # auth not required
+
+		if 'SCRAM-SHA-256' not in mech_line:
+			raise RuntimeError('Unsupported SASL mechanism: %s' % mech_line)
+
+		scram = ScramClient(['SCRAM-SHA-256'], auth_user, auth_pass)
+		client_first = scram.get_client_first()
+		raw_send(('sasl auth SCRAM-SHA-256 %d\r\n%s\r\n' % (len(client_first), client_first)).encode('utf-8'))
+
+		while True:
+			status = raw_readline()
+			if status.startswith('SASL_OK'):
+				return
+			if status.startswith('SASL_CONTINUE'):
+				server_msg = raw_readline()
+				scram.set_server_first(server_msg)
+				client_final = scram.get_client_final()
+				raw_send(('sasl auth %d\r\n%s\r\n' % (len(client_final), client_final)).encode('utf-8'))
+			else:
+				raise RuntimeError('SASL auth failed: %s' % status)
 
 	##########################################################################################
 	### commands
@@ -208,6 +306,10 @@ class ArcusMCNode:
 			full_cmd = bytes('stats ' + stat_args, 'utf-8')
 
 		op = self.add_op('stats', full_cmd, self._recv_stat)
+
+	def getattr(self, key):
+		full_cmd = bytes('getattr %s' % key, 'utf-8')
+		return self.add_op('getattr', full_cmd, self._recv_getattr)
 
 	def lop_create(self, key, flags, exptime=0, noreply=False, attr=None):
 		return self._coll_create('lop create', key, flags, exptime, noreply, attr)
@@ -626,6 +728,21 @@ class ArcusMCNode:
 				ret = e
 
 			op.set_result(ret)
+
+	def _recv_getattr(self):
+		attrs = {}
+		while True:
+			line = self.handle.readline()
+			if line == b'NOT_FOUND':
+				return None
+			if line == b'END':
+				return attrs
+			if line.startswith(b'CLIENT_ERROR') or line.startswith(b'SERVER_ERROR') or line.startswith(b'ERROR'):
+				raise Exception(line.decode('utf-8'))
+			if line.startswith(b'ATTR '):
+				key_val = line[5:].decode('utf-8')
+				k, v = key_val.split('=', 1)
+				attrs[k.strip()] = v.strip()
 
 	def _recv_ok(self):
 		line = self.handle.readline()
@@ -1097,41 +1214,50 @@ class EflagFilter:
 
 
 
+import selectors
+
 class ArcusMCPoll(threading.Thread):
 	def __init__(self, node_allocator):
 		threading.Thread.__init__(self)
-		self.epoll = select.epoll()
+		self.selector = selectors.DefaultSelector()
 		self.sock_node_map = {}
 		self.node_allocator = node_allocator
 
 	def run(self):
-		arcuslog(self, 'epoll start')
+		arcuslog(self, 'selector start')
 
 		while True:
-			events = self.epoll.poll(2)
+			events = self.selector.select(timeout=2)
 
 			if self.node_allocator.shutdown == True:
-				arcuslog(self, 'epoll out')
+				arcuslog(self, 'selector out')
+				self.selector.close()
 				return
 
-			for fileno, event in events:
-				if event & select.EPOLLIN:
-					node = self.sock_node_map[fileno]
+			for key, mask in events:
+				node = key.data
+				if mask & selectors.EVENT_READ:
 					node.do_op()
-
-				if event & select.EPOLLHUP:
-					print('EPOLL HUP')
-					self.epoll.unregister(fileno)
-					node = self.sock_node_map[fileno]
-					node.disconnect()
-					del self.sock_node_map[fileno]
 
 
 	def register_node(self, node):
-		self.epoll.register(node.get_fileno(), select.EPOLLIN | select.EPOLLHUP)
-
-		arcuslog(self, 'regist node: ', node.get_fileno(), node)
-		self.sock_node_map[node.get_fileno()] = node
+		sock = node.handle.socket
+		if sock is None:
+			return
+		fileno = sock.fileno()
+		if fileno == -1:
+			return
+		# unregister first in case of reconnect
+		try:
+			self.selector.unregister(sock)
+		except Exception:
+			pass
+		try:
+			self.selector.register(sock, selectors.EVENT_READ, node)
+		except Exception:
+			return
+		arcuslog(self, 'regist node: ', fileno, node)
+		self.sock_node_map[fileno] = node
 		
 		
 		
@@ -1173,15 +1299,16 @@ class ArcusMCWorker(threading.Thread):
 
 
 class ArcusMCNodeAllocator:
-	def __init__(self, transcoder):
+	def __init__(self, transcoder, auth_user='', auth_pass=''):
 		self.transcoder = transcoder
+		self.auth_user = auth_user
+		self.auth_pass = auth_pass
 		self.worker = ArcusMCWorker(self)
 		self.worker.start()
 		self.shutdown = False
-		
 
 	def alloc(self, addr, name):
-		ret = ArcusMCNode(addr, name, self.transcoder, self)
+		ret = ArcusMCNode(addr, name, self.transcoder, self, self.auth_user, self.auth_pass)
 		self.worker.register_node(ret)
 		return ret
 
