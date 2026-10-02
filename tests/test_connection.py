@@ -25,16 +25,9 @@ class ConnectionTestCase(unittest.TestCase):
 
     def make_node(self, *chunks):
         connection, sock = self.make_connection(*chunks)
-        node = ArcusMCNode.__new__(ArcusMCNode)
-        node.handle = connection
-        node.transcoder = ArcusTranscoder()
-        node.lock = threading.Lock()
-        node._io_lock = threading.RLock()
-        node._generation = 0
-        node._pending = set()
-        node.node_allocator = SimpleNamespace(worker=Mock())
-        node.ops = []
-        node.addr = "127.0.0.1:11211"
+        allocator = SimpleNamespace(shutdown=False, worker=Mock())
+        with patch("arcus.protocol.node.Connection", return_value=connection):
+            node = ArcusMCNode("127.0.0.1:11211", "test", ArcusTranscoder(), allocator)
         return node, sock
 
 
@@ -139,36 +132,36 @@ class ConnectionTests(ConnectionTestCase):
 
 class ValueResponseTests(ConnectionTestCase):
     def test_get_and_gets_preserve_normal_miss(self):
-        for method in ("_recv_value", "_recv_cas_value"):
+        for method in ("value", "cas_value"):
             with self.subTest(method=method):
                 node, sock = self.make_node(b"END\r\n")
-                self.assertIsNone(getattr(node, method)())
+                self.assertIsNone(getattr(node.responses.kv, method)())
                 self.assertFalse(node.handle.disconnected())
                 sock.close.assert_not_called()
 
     def test_get_decodes_partial_payload_with_embedded_crlf(self):
         node, sock = self.make_node(b"VALUE key 0 4\r\na\r", b"\nb\r", b"\nEND\r\n")
-        self.assertEqual(node._recv_value(), "a\r\nb")
+        self.assertEqual(node.responses.kv.value(), "a\r\nb")
         self.assertEqual(node.handle.buffer, b"")
         self.assertEqual(sock.recv.call_count, 3)
 
     def test_gets_preserves_cas_token_and_following_response(self):
         node, sock = self.make_node(b"VALUE key 0 3 42\r\nabc\r\nEND\r\nEND\r\n")
-        self.assertEqual(node._recv_cas_value(), ("abc", b"42"))
-        self.assertIsNone(node._recv_value())
+        self.assertEqual(node.responses.kv.cas_value(), ("abc", b"42"))
+        self.assertIsNone(node.responses.kv.value())
         self.assertEqual(sock.recv.call_count, 1)
 
     def test_empty_value_is_distinct_from_miss(self):
         node, _ = self.make_node(b"VALUE key 0 0\r\n\r\nEND\r\n")
-        self.assertEqual(node._recv_value(), "")
+        self.assertEqual(node.responses.kv.value(), "")
 
     def test_unexpected_response_is_not_a_miss(self):
         for response in (b"ERROR", b"SERVER_ERROR unavailable", b"END extra", b""):
-            for method in ("_recv_value", "_recv_cas_value"):
+            for method in ("value", "cas_value"):
                 with self.subTest(response=response, method=method):
                     node, _ = self.make_node(response + b"\r\n")
                     with self.assertRaises(ArcusProtocolException):
-                        getattr(node, method)()
+                        getattr(node.responses.kv, method)()
 
     def test_malformed_get_headers_raise_protocol_error(self):
         for header in (
@@ -183,7 +176,7 @@ class ValueResponseTests(ConnectionTestCase):
             with self.subTest(header=header):
                 node, _ = self.make_node(header + b"\r\n")
                 with self.assertRaises(ArcusProtocolException):
-                    node._recv_value()
+                    node.responses.kv.value()
 
     def test_malformed_gets_headers_raise_protocol_error(self):
         for header in (
@@ -194,44 +187,44 @@ class ValueResponseTests(ConnectionTestCase):
             with self.subTest(header=header):
                 node, _ = self.make_node(header + b"\r\n")
                 with self.assertRaises(ArcusProtocolException):
-                    node._recv_cas_value()
+                    node.responses.kv.cas_value()
 
     def test_wrong_payload_terminator_is_rejected(self):
         node, _ = self.make_node(b"VALUE key 0 3\r\nabcXXEND\r\n")
         with self.assertRaises(ArcusProtocolException):
-            node._recv_value()
+            node.responses.kv.value()
 
     def test_incorrect_payload_length_is_rejected(self):
         for length in (2, 4):
             with self.subTest(length=length):
                 node, _ = self.make_node(b"VALUE key 0 %d\r\nabc\r\nEND\r\n" % length)
                 with self.assertRaises(ArcusProtocolException):
-                    node._recv_value()
+                    node.responses.kv.value()
 
     def test_wrong_response_terminator_is_rejected(self):
         node, _ = self.make_node(b"VALUE key 0 3\r\nabc\r\nSTORED\r\n")
         with self.assertRaises(ArcusProtocolException):
-            node._recv_value()
+            node.responses.kv.value()
 
     def test_payload_eof_raises_connection_error(self):
         node, sock = self.make_node(b"VALUE key 0 3\r\nab", b"")
         with self.assertRaises(ArcusNodeConnectionException):
-            node._recv_value()
+            node.responses.kv.value()
         self.assertTrue(node.handle.disconnected())
         sock.close.assert_called_once_with()
 
     def test_decode_failure_does_not_leave_end_for_the_next_operation(self):
         node, _ = self.make_node(b"VALUE key 0 1\r\n\xff\r\nEND\r\nEND\r\n")
         with self.assertRaises(UnicodeDecodeError):
-            node._recv_value()
-        self.assertIsNone(node._recv_value())
+            node.responses.kv.value()
+        self.assertIsNone(node.responses.kv.value())
 
     def test_buffered_responses_resolve_the_matching_operations(self):
         node, sock = self.make_node(
             b"VALUE first 0 3\r\none\r\nEND\r\nVALUE second 0 3\r\ntwo\r\nEND\r\n"
         )
-        first = Mock(callback=node._recv_value, deadline=time.monotonic() + 5)
-        second = Mock(callback=node._recv_value, deadline=time.monotonic() + 5)
+        first = Mock(callback=node.responses.kv.value, deadline=time.monotonic() + 5)
+        second = Mock(callback=node.responses.kv.value, deadline=time.monotonic() + 5)
         node.ops = [first, second]
         node.do_op()
         first.set_result.assert_called_once_with("one")
@@ -241,8 +234,8 @@ class ValueResponseTests(ConnectionTestCase):
 
     def test_protocol_failure_invalidates_pending_operations(self):
         node, sock = self.make_node(b"VALUE key 0 -1\r\nEND\r\n")
-        first = Mock(callback=node._recv_value, deadline=time.monotonic() + 5)
-        second = Mock(callback=node._recv_value, deadline=time.monotonic() + 5)
+        first = Mock(callback=node.responses.kv.value, deadline=time.monotonic() + 5)
+        second = Mock(callback=node.responses.kv.value, deadline=time.monotonic() + 5)
         node.ops = [first, second]
         node.do_op()
         first.set_result.assert_called_once()
@@ -257,8 +250,8 @@ class ValueResponseTests(ConnectionTestCase):
 
     def test_eof_invalidates_pending_operations(self):
         node, sock = self.make_node(b"")
-        first = Mock(callback=node._recv_value, deadline=time.monotonic() + 5)
-        second = Mock(callback=node._recv_value, deadline=time.monotonic() + 5)
+        first = Mock(callback=node.responses.kv.value, deadline=time.monotonic() + 5)
+        second = Mock(callback=node.responses.kv.value, deadline=time.monotonic() + 5)
         node.ops = [first, second]
         node.do_op()
         self.assertIsInstance(
@@ -275,8 +268,12 @@ class ValueResponseTests(ConnectionTestCase):
         ):
             with self.subTest(error=type(error).__name__):
                 node, sock = self.make_node(error)
-                first = Mock(callback=node._recv_value, deadline=time.monotonic() + 5)
-                second = Mock(callback=node._recv_value, deadline=time.monotonic() + 5)
+                first = Mock(
+                    callback=node.responses.kv.value, deadline=time.monotonic() + 5
+                )
+                second = Mock(
+                    callback=node.responses.kv.value, deadline=time.monotonic() + 5
+                )
                 node.ops = [first, second]
                 node.do_op()
                 first.set_result.assert_called_once_with(error)
@@ -287,7 +284,9 @@ class ValueResponseTests(ConnectionTestCase):
 
     def test_unsolicited_buffered_response_discards_connection(self):
         node, sock = self.make_node(b"END\r\nEND\r\n")
-        operation = Mock(callback=node._recv_value, deadline=time.monotonic() + 5)
+        operation = Mock(
+            callback=node.responses.kv.value, deadline=time.monotonic() + 5
+        )
         node.ops = [operation]
         node.do_op()
         operation.set_result.assert_called_once_with(None)

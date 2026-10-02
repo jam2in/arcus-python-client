@@ -1,4 +1,6 @@
-from unittest.mock import Mock
+import queue
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from arcus import Arcus, ArcusTranscoder
 from arcus_mc_node import ArcusMCNode
@@ -18,19 +20,15 @@ def test_cas_forwards_the_expiration_and_token():
 
 
 def test_cas_encodes_a_token_returned_by_gets():
-    node = object.__new__(ArcusMCNode)
-    node.addr = "127.0.0.1:11211"
-    node.name = "test"
-    node.transcoder = ArcusTranscoder()
-    node.add_op = Mock()
+    allocator = SimpleNamespace(shutdown=False, worker=SimpleNamespace(q=queue.Queue()))
+    with patch("arcus.protocol.node.Connection"):
+        node = ArcusMCNode("127.0.0.1:11211", "test", ArcusTranscoder(), allocator)
 
     for token in (123, b"123"):
-        node.add_op.reset_mock()
         operation = node.cas("key", "value", token, exptime=60)
-        node.add_op.assert_called_once_with(
-            "cas", b"cas key 0 60 5 123\r\nvalue", node._recv_set
-        )
-        assert operation is node.add_op.return_value
+        assert operation.request == b"cas key 0 60 5 123\r\nvalue"
+        assert operation is allocator.worker.q.get_nowait()
+        assert not operation.has_result()
 
 
 def test_btree_decrement_dispatches_to_decrement():

@@ -16,7 +16,7 @@
 #
 
 
-"""Cache-node state and the Arcus text protocol."""
+"""Node transport, operation lifetime and compatibility command delegates."""
 
 import socket
 import threading
@@ -28,15 +28,11 @@ from ..exceptions import (
     ArcusNodeConnectionException,
     ArcusNodeSocketException,
     ArcusProtocolException,
-    CollectionExist,
-    CollectionHexFormat,
-    CollectionIndex,
-    CollectionOverflow,
-    CollectionType,
-    CollectionUnreadable,
 )
 from ..operation import ArcusOperation
+from .commands import CommandHandlers
 from .connection import Connection
+from .responses import ResponseHandlers
 
 
 class ArcusMCNode:
@@ -44,12 +40,10 @@ class ArcusMCNode:
     shutdown = False
 
     def __init__(self, addr, name, transcoder, node_allocator):
-        # mandatory files
         self.addr = addr
         self.name = name
         self.in_use = False
         self.transcoder = transcoder
-
         self.node_allocator = node_allocator
         self.handle = Connection(
             addr,
@@ -57,11 +51,13 @@ class ArcusMCNode:
             io_timeout=getattr(node_allocator, "io_timeout", 1.0),
         )
         self.ops = []
-        self.lock = Lock()  # for ordering worker.q and ops
+        self.lock = Lock()
         self._io_lock = threading.RLock()
         self._generation = 0
         self._pending = set()
         self._closed = False
+        self.responses = ResponseHandlers(self.handle, self.transcoder)
+        self.commands = CommandHandlers(self, self.transcoder, self.responses)
 
     def __repr__(self):
         return "%s-%s" % (self.addr, self.name)
@@ -82,7 +78,6 @@ class ArcusMCNode:
                 op.set_invalid()
 
     def _fail_operation(self, op, error):
-        # Keep the original error, but finish teardown before waking its waiter.
         with self.lock:
             self._pending.discard(op)
             if op in self.ops:
@@ -107,14 +102,12 @@ class ArcusMCNode:
         self.handle.send_request(request)
 
     def process_operation(self, op):
-        # Serialize disconnect with the last validity check and the entire write.
-        # Failed or partial writes are never replayed on a replacement connection.
         with self._io_lock:
             if (
                 self._closed
                 or self.node_allocator.shutdown
                 or op.invalid
-                or op.generation != self._generation
+                or (op.generation != self._generation)
             ):
                 op.set_invalid()
                 return
@@ -136,7 +129,7 @@ class ArcusMCNode:
     def expire_operations(self):
         with self._io_lock:
             with self.lock:
-                expired = any(op.deadline <= time.monotonic() for op in self._pending)
+                expired = any((op.deadline <= time.monotonic() for op in self._pending))
             if expired:
                 with self.lock:
                     ops = list(self._pending)
@@ -146,242 +139,12 @@ class ArcusMCNode:
                 for op in ops:
                     op.set_result(socket.timeout("operation deadline exceeded"))
 
-    ##########################################################################################
-    ### commands
-    ##########################################################################################
-    def get(self, key):
-        return self._get("get", key)
-
-    def gets(self, key):
-        return self._get("gets", key)
-
-    def set(self, key, val, exptime=0):
-        return self._set("set", key, val, exptime)
-
-    def cas(self, key, val, cas_id, exptime=0):
-        return self._cas("cas", key, val, cas_id, exptime)
-
-    def incr(self, key, value=1):
-        return self._incr_decr("incr", key, value)
-
-    def decr(self, key, value=1):
-        return self._incr_decr("decr", key, value)
-
-    def add(self, key, val, exptime=0):
-        return self._set("add", key, val, exptime)
-
-    def append(self, key, val, exptime=0):
-        return self._set("append", key, val, exptime)
-
-    def prepend(self, key, val, exptime=0):
-        return self._set("prepend", key, val, exptime)
-
-    def replace(self, key, val, exptime=0):
-        return self._set("replace", key, val, exptime)
-
-    def delete(self, key):
-        full_cmd = "delete %s" % key
-        return self.add_op("delete", bytes(full_cmd, "utf-8"), self._recv_delete)
-
-    def flush_all(self):
-        full_cmd = b"flush_all"
-        return self.add_op("flush_all", full_cmd, self._recv_ok)
-
-    def get_stats(self, stat_args=None):
-        if stat_args == None:
-            full_cmd = b"stats"
-        else:
-            full_cmd = bytes("stats " + stat_args, "utf-8")
-
-        op = self.add_op("stats", full_cmd, self._recv_stat)
-
-    def lop_create(self, key, flags, exptime=0, noreply=False, attr=None):
-        return self._coll_create("lop create", key, flags, exptime, noreply, attr)
-
-    def lop_insert(self, key, index, value, noreply=False, pipe=False, attr=None):
-        return self._coll_set("lop insert", key, index, value, noreply, pipe, attr)
-
-    def lop_delete(self, key, range, drop=False, noreply=False, pipe=False):
-        option = ""
-        if drop == True:
-            option += "drop"
-
-        if noreply == True:
-            option += " noreply"
-
-        if pipe == True:
-            assert noreply == False
-            option += " pipe"
-
-        if isinstance(range, tuple):
-            full_cmd = bytes(
-                "lop delete %s %d..%d %s" % (key, range[0], range[1], option), "utf-8"
-            )
-            return self.add_op(
-                "lop delete", full_cmd, self._recv_delete, noreply or pipe
-            )
-        else:
-            full_cmd = bytes("lop delete %s %d %s" % (key, range, option), "utf-8")
-            return self.add_op(
-                "lop delete", full_cmd, self._recv_delete, noreply or pipe
-            )
-
-    def lop_get(self, key, range, delete=False, drop=False):
-        return self._coll_get("lop get", key, range, self._recv_lop_get, delete, drop)
-
-    def sop_create(self, key, flags, exptime=0, noreply=False, attr=None):
-        return self._coll_create("sop create", key, flags, exptime, noreply, attr)
-
-    def sop_insert(self, key, value, noreply=False, pipe=False, attr=None):
-        return self._coll_set("sop insert", key, None, value, noreply, pipe, attr)
-
-    def sop_get(self, key, count=0, delete=False, drop=False):
-        return self._coll_get("sop get", key, count, self._recv_sop_get, delete, drop)
-
-    def sop_delete(self, key, val, drop=False, noreply=False, pipe=False):
-        flags, len, value = self.transcoder.encode(val)
-
-        option = "%d" % len
-        if drop == True:
-            option += "drop"
-
-        if noreply == True:
-            option += " noreply"
-
-        if pipe == True:
-            assert noreply == False
-            option += " pipe"
-
-        option += "\r\n"
-
-        full_cmd = bytes("sop delete %s %s" % (key, option), "utf-8") + value
-        return self.add_op("sop delete", full_cmd, self._recv_delete, noreply or pipe)
-
-    def sop_exist(self, key, val, pipe=False):
-        flags, len, value = self.transcoder.encode(val)
-
-        option = "%d" % len
-        if pipe == True:
-            assert noreply == False
-            option += " pipe"
-
-        option += "\r\n"
-
-        full_cmd = bytes("sop exist %s %s" % (key, option), "utf-8") + value
-        return self.add_op("sop exist", full_cmd, self._recv_exist, pipe)
-
-    def bop_create(self, key, flags, exptime=0, noreply=False, attr=None):
-        return self._coll_create("bop create", key, flags, exptime, noreply, attr)
-
-    def bop_insert(
-        self, key, bkey, value, eflag=None, noreply=False, pipe=False, attr=None
-    ):
-        return self._coll_set(
-            "bop insert", key, None, value, noreply, pipe, attr, bkey, eflag
-        )
-
-    def bop_upsert(
-        self, key, bkey, value, eflag=None, noreply=False, pipe=False, attr=None
-    ):
-        return self._coll_set(
-            "bop upsert", key, None, value, noreply, pipe, attr, bkey, eflag
-        )
-
-    def bop_update(
-        self, key, bkey, value, eflag=None, noreply=False, pipe=False, attr=None
-    ):
-        return self._coll_set(
-            "bop update", key, None, value, noreply, pipe, attr, bkey, eflag
-        )
-
-    def bop_delete(
-        self, key, range, filter=None, count=None, drop=False, noreply=False, pipe=False
-    ):
-        option = ""
-
-        if filter != None:
-            option += filter.get_expr() + " "
-
-        if count != None:
-            option += "%d " % count
-
-        if drop == True:
-            option += "drop"
-
-        if noreply == True:
-            option += " noreply"
-
-        if pipe == True:
-            assert noreply == False
-            option += " pipe"
-
-        if isinstance(range, tuple):
-            if isinstance(range[0], str):
-                if range[0][:2] != "0x" or range[1][:2] != "0x":
-                    raise CollectionHexFormat()
-
-                full_cmd = bytes(
-                    "bop delete %s %s..%s %s" % (key, range[0], range[1], option),
-                    "utf-8",
-                )
-                return self.add_op(
-                    "bop delete", full_cmd, self._recv_delete, noreply or pipe
-                )
-            else:
-                full_cmd = bytes(
-                    "bop delete %s %d..%d %s" % (key, range[0], range[1], option),
-                    "utf-8",
-                )
-                return self.add_op(
-                    "bop delete", full_cmd, self._recv_delete, noreply or pipe
-                )
-        else:
-            if isinstance(range, str):
-                if range[:2] != "0x":
-                    raise CollectionHexFormat()
-
-                full_cmd = bytes("bop delete %s %s %s" % (key, range, option), "utf-8")
-                return self.add_op(
-                    "bop delete", full_cmd, self._recv_delete, noreply or pipe
-                )
-            else:
-                full_cmd = bytes("bop delete %s %d %s" % (key, range, option), "utf-8")
-                return self.add_op(
-                    "bop delete", full_cmd, self._recv_delete, noreply or pipe
-                )
-
-    def bop_get(self, key, range, filter=None, delete=False, drop=False):
-        return self._coll_get(
-            "bop get", key, range, self._recv_bop_get, delete, drop, filter=filter
-        )
-
-    def bop_mget(self, key_list, range, filter=None, offset=None, count=50):
-        return self._coll_mget("bop mget", key_list, range, filter, offset, count)
-
-    def bop_smget(self, key_list, range, filter=None, offset=None, count=2000):
-        return self._coll_mget("bop smget", key_list, range, filter, offset, count)
-
-    def bop_count(self, key, range, filter):
-        return self._coll_get(
-            "bop count", key, range, self._recv_bop_get, filter=filter
-        )
-
-    def bop_incr(self, key, bkey, value, noreply=False, pipe=False):
-        return self._bop_incrdecr("bop incr", key, bkey, value, noreply, pipe)
-
-    def bop_decr(self, key, bkey, value, noreply=False, pipe=False):
-        return self._bop_incrdecr("bop decr", key, bkey, value, noreply, pipe)
-
-    ##########################################################################################
-    ### Queue senders
-    ##########################################################################################
     def add_op(self, cmd, full_cmd, callback, noreply=False):
         op = ArcusOperation(self, full_cmd, callback)
         arcuslog(
             self,
             "add operation %s(%s:%s) to %s" % (full_cmd, callback, hex(id(op)), self),
         )
-
         with self._io_lock:
             with self.lock:
                 if self._closed or self.node_allocator.shutdown:
@@ -396,266 +159,16 @@ class ArcusMCNode:
                 if not noreply:
                     self.ops.append(op)
                 self.node_allocator.worker.q.put(op)
-
         return op
 
-    def _get(self, cmd, key):
-        full_cmd = bytes("%s %s" % (cmd, key), "utf-8")
-        if cmd == "gets":
-            callback = self._recv_cas_value
-        else:
-            callback = self._recv_value
-
-        op = self.add_op(cmd, full_cmd, callback)
-        return op
-
-    def _set(self, cmd, key, val, exptime=0):
-        flags, len, value = self.transcoder.encode(val)
-        if flags == None:
-            return 0
-
-        full_cmd = bytes(
-            "%s %s %d %d %d\r\n" % (cmd, key, flags, exptime, len), "utf-8"
-        )
-        full_cmd += value
-
-        op = self.add_op(cmd, full_cmd, self._recv_set)
-        return op
-
-    def _cas(self, cmd, key, val, cas_id, exptime=0):
-        flags, len, value = self.transcoder.encode(val)
-        if flags == None:
-            return 0
-
-        full_cmd = bytes(
-            "%s %s %d %d %d %d\r\n" % (cmd, key, flags, exptime, len, int(cas_id)),
-            "utf-8",
-        )
-        full_cmd += value
-
-        op = self.add_op(cmd, full_cmd, self._recv_set)
-        return op
-
-    def _incr_decr(self, cmd, key, value):
-        full_cmd = "%s %s %d" % (cmd, key, value)
-
-        op = self.add_op(cmd, bytes(full_cmd, "utf-8"), self._recv_set)
-        return op
-
-    def _coll_create(self, cmd, key, flags, exptime=0, noreply=False, attr=None):
-        if attr == None:
-            attr = {}
-
-        # default value
-        if "maxcount" not in attr:
-            attr["maxcount"] = 4000
-        if "ovflaction" not in attr:
-            attr["ovflaction"] = "tail_trim"
-        if "readable" not in attr:
-            attr["readable"] = True
-
-        option = "%d %d %d" % (flags, exptime, attr["maxcount"])
-        if attr["ovflaction"] != "tail_trim":
-            option += " " + attr["ovflaction"]
-        if attr["readable"] == False:
-            option += " unreadable"
-
-        if noreply == True:
-            option += " noreply"
-
-        full_cmd = bytes("%s %s %s" % (cmd, key, option), "utf-8")
-        return self.add_op(cmd, full_cmd, self._recv_coll_create, noreply)
-
-    def _bop_incrdecr(self, cmd, key, bkey, val, noreply=False, pipe=False):
-        if isinstance(val, int):
-            value = "%d" % val
-        else:
-            value = val
-
-        if isinstance(bkey, int):
-            bkey_str = "%d" % bkey
-        else:
-            if bkey[:2] != "0x":
-                raise CollectionHexFormat()
-            bkey_str = "%s" % bkey
-
-        option = "%s %s" % (bkey_str, value)
-
-        if noreply == True:
-            option += " noreply"
-
-        if pipe == True:
-            assert noreply == False
-            option += " pipe"
-
-        full_cmd = bytes("%s %s %s" % (cmd, key, option), "utf-8")
-        return self.add_op(cmd, full_cmd, self._recv_set, noreply or pipe)
-
-    def _coll_set(
-        self,
-        cmd,
-        key,
-        index,
-        val,
-        noreply=False,
-        pipe=False,
-        attr=None,
-        bkey=None,
-        eflag=None,
-    ):
-        flags, len, value = self.transcoder.encode(val)
-
-        if bkey != None:  # bop
-            assert index == None
-
-            if isinstance(bkey, int):
-                bkey_str = "%d" % bkey
-            else:
-                if bkey[:2] != "0x":
-                    raise CollectionHexFormat()
-                bkey_str = "%s" % bkey
-
-            if eflag != None:
-                if eflag[:2] != "0x":
-                    raise CollectionHexFormat()
-                option = "%s %s %d" % (bkey_str, eflag, len)
-            else:
-                option = "%s %d" % (bkey_str, len)
-        elif index != None:  # lop
-            option = "%d %d" % (index, len)
-        else:  # sop
-            option = "%d" % (len)
-
-        if attr != None:
-            # default mandatory value
-            if "flags" not in attr:
-                attr["flags"] = 0
-            if "exptime" not in attr:
-                attr["exptime"] = 0
-            if "maxcount" not in attr:
-                attr["maxcount"] = 4000
-
-            option += " create %d %d %d" % (
-                attr["flags"],
-                attr["exptime"],
-                attr["maxcount"],
-            )
-            if "ovflaction" in attr:
-                option += " " + attr["ovflaction"]
-            if "readable" in attr and attr["readable"] == False:
-                option += " unreadable"
-
-        if noreply == True:
-            option += " noreply"
-
-        if pipe == True:
-            assert noreply == False
-            option += " pipe"
-
-        option += "\r\n"
-
-        full_cmd = bytes("%s %s %s" % (cmd, key, option), "utf-8") + value
-        return self.add_op(cmd, full_cmd, self._recv_coll_set, noreply or pipe)
-
-    def _coll_get(self, cmd, key, range, callback, delete=None, drop=None, filter=None):
-        option = ""
-        type = cmd[:3]
-
-        if filter != None:
-            option += filter.get_expr() + " "
-
-        if delete == True:
-            option += "delete"
-
-        if drop == True:
-            assert delete == False
-            option += "drop"
-
-        if isinstance(range, tuple):
-            if type == "bop" and isinstance(range[0], str):
-                if range[0][:2] != "0x" or range[1][:2] != "0x":
-                    raise CollectionHexFormat()
-
-                full_cmd = bytes(
-                    "%s %s %s..%s %s" % (cmd, key, range[0], range[1], option), "utf-8"
-                )
-                return self.add_op(cmd, full_cmd, callback)
-            else:
-                full_cmd = bytes(
-                    "%s %s %d..%d %s" % (cmd, key, range[0], range[1], option), "utf-8"
-                )
-                return self.add_op(cmd, full_cmd, callback)
-        else:
-            if type == "bop" and isinstance(range, str):
-                if range[:2] != "0x":
-                    raise CollectionHexFormat()
-
-                full_cmd = bytes("%s %s %s %s" % (cmd, key, range, option), "utf-8")
-                return self.add_op(cmd, full_cmd, callback)
-            else:
-                full_cmd = bytes("%s %s %d %s" % (cmd, key, range, option), "utf-8")
-                return self.add_op(cmd, full_cmd, callback)
-
-    def _coll_mget(self, org_cmd, key_list, range, filter, offset, count):
-
-        comma_sep_keys = ""
-        for key in key_list:
-            if comma_sep_keys != "":
-                comma_sep_keys += ","
-            comma_sep_keys += key
-
-        cmd = "%s %d %d " % (org_cmd, len(comma_sep_keys), len(key_list))
-
-        if isinstance(range, tuple):
-            if isinstance(range[0], str):
-                if range[0][:2] != "0x" or range[1][:2] != "0x":
-                    raise CollectionHexFormat()
-
-                cmd += "%s..%s" % range
-            else:
-                cmd += "%d..%d" % range
-        else:
-            if isinstance(range, str):
-                if range[:2] != "0x":
-                    raise CollectionHexFormat()
-
-                cmd += "%s" % range
-            else:
-                cmd += "%d" % range
-
-        if filter != None:
-            cmd += " " + filter.get_expr()
-
-        if offset != None:
-            cmd += " %d" % offset
-        cmd += " %d" % count
-
-        cmd += "\r\n%s" % comma_sep_keys
-        cmd = bytes(cmd, "utf-8")
-
-        if org_cmd == "bop mget":
-            reply = self._recv_mget
-        else:
-            reply = self._recv_smget
-
-        op = self.add_op(org_cmd, cmd, reply)
-
-        return op
-
-    ##########################################################################################
-    ### recievers
-    ##########################################################################################
     def do_op(self):
         with self._io_lock:
             while True:
                 with self.lock:
                     op = self.ops.pop(0) if self.ops else None
-
                 if op is None:
-                    # Readiness without a response slot is EOF or unsolicited data.
                     self.disconnect()
                     return
-
                 try:
                     self.handle.deadline = op.deadline
                     ret = op.callback()
@@ -672,432 +185,123 @@ class ArcusMCNode:
                     ret = error
                 finally:
                     self.handle.deadline = None
-
                 with self.lock:
                     self._pending.discard(op)
                 op.set_result(ret)
                 if not self.handle.hasline():
                     return
 
-    def _recv_ok(self):
-        line = self.handle.readline()
-        if line == b"OK":
-            return True
+    def submit(self, request):
+        """Queue an immutable command; lifecycle and completion stay with this node."""
+        return self.add_op(
+            request.name, request.payload, request.response, request.noreply
+        )
 
-        return False
+    def get(self, key):
+        return self.commands.kv.get(key)
 
-    def _recv_stat(self):
-        data = {}
-        while True:
-            line = handle.readline()
-            if line[:3] == b"END" or line is None:
-                break
+    def gets(self, key):
+        return self.commands.kv.gets(key)
 
-            dummy, k, v = line.split(" ", 2)
-            data[k] = v
+    def set(self, key, val, exptime=0):
+        return self.commands.kv.set(key, val, exptime)
 
-            return data
+    def cas(self, key, val, cas_id, exptime=0):
+        return self.commands.kv.cas(key, val, cas_id, exptime)
 
-    def _recv_set(self):
-        line = self.handle.readline()
-        if line[0:8] == b"RESPONSE":
-            dummy, count = line.split()
+    def incr(self, key, value=1):
+        return self.commands.kv.incr(key, value)
 
-            ret = []
-            for i in range(0, int(count)):
-                line = self.handle.readline()
-                ret.append(line.decode("utf-8"))
+    def decr(self, key, value=1):
+        return self.commands.kv.decr(key, value)
 
-            line = self.handle.readline()  # b'END'
+    def add(self, key, val, exptime=0):
+        return self.commands.kv.add(key, val, exptime)
 
-            return ret
+    def append(self, key, val, exptime=0):
+        return self.commands.kv.append(key, val, exptime)
 
-        if line == b"STORED":
-            return True
+    def prepend(self, key, val, exptime=0):
+        return self.commands.kv.prepend(key, val, exptime)
 
-        if line == b"NOT_FOUND":
-            return False
+    def replace(self, key, val, exptime=0):
+        return self.commands.kv.replace(key, val, exptime)
 
-        if line == b"TYPE_MISMATCH":
-            raise CollectionType()
+    def delete(self, key):
+        return self.commands.kv.delete(key)
 
-        if line == b"OVERFLOWED":
-            raise CollectionOverflow()
+    def flush_all(self):
+        return self.commands.admin.flush_all()
 
-        if line == b"OUT_OF_RANGE":
-            raise CollectionIndex()
+    def get_stats(self, stat_args=None):
+        return self.commands.admin.get_stats(stat_args)
 
-        if line.isdigit():  # incr, decr, bop incr, bop decr
-            return int(line)
+    def lop_create(self, key, flags, exptime=0, noreply=False, attr=None):
+        return self.commands.list.create(key, flags, exptime, noreply, attr)
 
-        return False
+    def lop_insert(self, key, index, value, noreply=False, pipe=False, attr=None):
+        return self.commands.list.insert(key, index, value, noreply, pipe, attr)
 
-    def _recv_delete(self):
-        line = self.handle.readline()
-        if line[0:8] == b"RESPONSE":
-            dummy, count = line.split()
+    def lop_delete(self, key, range, drop=False, noreply=False, pipe=False):
+        return self.commands.list.delete(key, range, drop, noreply, pipe)
 
-            ret = []
-            for i in range(0, int(count)):
-                line = self.handle.readline()
-                ret.append(line.decode("utf-8"))
+    def lop_get(self, key, range, delete=False, drop=False):
+        return self.commands.list.get(key, range, delete, drop)
 
-            line = self.handle.readline()  # b'END'
+    def sop_create(self, key, flags, exptime=0, noreply=False, attr=None):
+        return self.commands.set.create(key, flags, exptime, noreply, attr)
 
-            return ret
+    def sop_insert(self, key, value, noreply=False, pipe=False, attr=None):
+        return self.commands.set.insert(key, value, noreply, pipe, attr)
 
-        if line == b"DELETED":
-            return True
+    def sop_get(self, key, count=0, delete=False, drop=False):
+        return self.commands.set.get(key, count, delete, drop)
 
-        if line == b"NOT_FOUND":
-            return True  # True ?? (or exception)
+    def sop_delete(self, key, val, drop=False, noreply=False, pipe=False):
+        return self.commands.set.delete(key, val, drop, noreply, pipe)
 
-        if line == b"TYPE_MISMATCH":
-            raise CollectionType()
+    def sop_exist(self, key, val, pipe=False):
+        return self.commands.set.exist(key, val, pipe)
 
-        if line == b"OVERFLOWED":
-            raise CollectionOverflow()
+    def bop_create(self, key, flags, exptime=0, noreply=False, attr=None):
+        return self.commands.btree.create(key, flags, exptime, noreply, attr)
 
-        if line == b"OUT_OF_RANGE" or line == b"NOT_FOUND_ELEMENT":
-            raise CollectionIndex()
+    def bop_insert(
+        self, key, bkey, value, eflag=None, noreply=False, pipe=False, attr=None
+    ):
+        return self.commands.btree.insert(key, bkey, value, eflag, noreply, pipe, attr)
 
-        return False
+    def bop_upsert(
+        self, key, bkey, value, eflag=None, noreply=False, pipe=False, attr=None
+    ):
+        return self.commands.btree.upsert(key, bkey, value, eflag, noreply, pipe, attr)
 
-    def _recv_cas_value(self):
-        fields = self._recv_value_header(5)
-        if fields is None:
-            return None
+    def bop_update(
+        self, key, bkey, value, eflag=None, noreply=False, pipe=False, attr=None
+    ):
+        return self.commands.btree.update(key, bkey, value, eflag, noreply, pipe, attr)
 
-        val = self._decode_value(fields[0], fields[1])
-        return (val, fields[2])
+    def bop_delete(
+        self, key, range, filter=None, count=None, drop=False, noreply=False, pipe=False
+    ):
+        return self.commands.btree.delete(
+            key, range, filter, count, drop, noreply, pipe
+        )
 
-    def _recv_value(self):
-        fields = self._recv_value_header(4)
-        if fields is None:
-            return None
+    def bop_get(self, key, range, filter=None, delete=False, drop=False):
+        return self.commands.btree.get(key, range, filter, delete, drop)
 
-        return self._decode_value(fields[0], fields[1])
+    def bop_mget(self, key_list, range, filter=None, offset=None, count=50):
+        return self.commands.btree.mget(key_list, range, filter, offset, count)
 
-    def _recv_value_header(self, field_count):
-        line = self.handle.readline()
-        if line == b"END":
-            return None
+    def bop_smget(self, key_list, range, filter=None, offset=None, count=2000):
+        return self.commands.btree.smget(key_list, range, filter, offset, count)
 
-        fields = line.split()
-        if (
-            len(fields) != field_count
-            or fields[0] != b"VALUE"
-            or not fields[2].isdigit()
-            or not fields[3].isdigit()
-            or (field_count == 5 and not fields[4].isdigit())
-        ):
-            raise ArcusProtocolException("invalid value response header: %r" % line)
-        try:
-            flags, length = int(fields[2]), int(fields[3])
-        except ValueError as e:
-            raise ArcusProtocolException(
-                "invalid value response header: %r" % line
-            ) from e
-        return flags, length, fields[4] if field_count == 5 else None
+    def bop_count(self, key, range, filter):
+        return self.commands.btree.count(key, range, filter)
 
-    def _recv_coll_create(self):
-        line = self.handle.readline()
-        if line == b"CREATED":
-            return True
+    def bop_incr(self, key, bkey, value, noreply=False, pipe=False):
+        return self.commands.btree.incr(key, bkey, value, noreply, pipe)
 
-        if line == b"EXISTS":
-            raise CollectionExist()
-
-        return False
-
-    def _recv_coll_set(self):
-        line = self.handle.readline()
-        if line[0:8] == b"RESPONSE":
-            dummy, count = line.split()
-
-            ret = []
-            for i in range(0, int(count)):
-                line = self.handle.readline()
-                ret.append(line.decode("utf-8"))
-
-            line = self.handle.readline()  # b'END'
-
-            return ret
-
-        if line == b"STORED":
-            return True
-
-        if line == b"NOT_FOUND":
-            return False
-
-        if line == b"TYPE_MISMATCH":
-            raise CollectionType()
-
-        if line == b"OVERFLOWED":
-            raise CollectionOverflow()
-
-        if line == b"OUT_OF_RANGE":
-            raise CollectionIndex()
-
-        return False
-
-    def _recv_lop_get(self):
-        ret, value = self._decode_collection("lop")
-        if ret == b"NOT_FOUND":
-            return None
-
-        if ret == b"TYPE_MISMATCH":
-            raise CollectionType()
-
-        if ret == b"UNREADABLE":
-            raise CollectionUnreadable()
-
-        if ret == b"OUT_OF_RANGE" or ret == b"NOT_FOUND_ELEMENT":
-            value = []
-
-        return value
-
-    def _recv_sop_get(self):
-        ret, value = self._decode_collection("sop")
-        if ret == b"NOT_FOUND":
-            return None
-
-        if ret == b"TYPE_MISMATCH":
-            raise CollectionType()
-
-        if ret == b"UNREADABLE":
-            raise CollectionUnreadable()
-
-        if ret == b"OUT_OF_RANGE" or ret == b"NOT_FOUND_ELEMENT":
-            value = set()
-
-        return value
-
-    def _recv_exist(self):
-        line = self.handle.readline()
-        return line == b"EXIST"
-
-    def _recv_bop_get(self):
-        ret, value = self._decode_collection("bop")
-        if ret == b"NOT_FOUND":
-            return None
-
-        if ret == b"TYPE_MISMATCH":
-            raise CollectionType()
-
-        if ret == b"UNREADABLE":
-            raise CollectionUnreadable()
-
-        if ret == b"OUT_OF_RANGE" or ret == b"NOT_FOUND_ELEMENT":
-            value = {}
-
-        return value
-
-    def _recv_mget(self):
-        ret, value, miss = self._decode_bop_mget()
-        if ret == b"NOT_FOUND":
-            return None
-
-        if ret == b"TYPE_MISMATCH":
-            raise CollectionType()
-
-        if ret == b"UNREADABLE":
-            raise CollectionUnreadable()
-
-        if ret == b"OUT_OF_RANGE" or ret == b"NOT_FOUND_ELEMENT":
-            raise CollectionIndex()
-
-        return (value, miss)
-
-    def _recv_smget(self):
-        ret, value, miss = self._decode_bop_smget()
-        if ret == b"NOT_FOUND":
-            return None
-
-        if ret == b"TYPE_MISMATCH":
-            raise CollectionType()
-
-        if ret == b"UNREADABLE":
-            raise CollectionUnreadable()
-
-        if ret == b"OUT_OF_RANGE" or ret == b"NOT_FOUND_ELEMENT":
-            raise CollectionIndex()
-
-        return (value, miss)
-
-    ##########################################################################################
-    ### decoders
-    ##########################################################################################
-    def _decode_value(self, flags, rlen):
-        if rlen < 0:
-            raise ArcusProtocolException("invalid response length: %d" % rlen)
-        rlen += 2  # include \r\n
-        buf = self.handle.recv(rlen)
-        if len(buf) != rlen:
-            raise ArcusNodeSocketException(
-                "received %d bytes when expecting %d" % (len(buf), rlen)
-            )
-
-        if not buf.endswith(b"\r\n"):
-            raise ArcusProtocolException("invalid value payload terminator")
-
-        line = self.handle.readline()
-        if line != b"END":
-            raise ArcusProtocolException(
-                "invalid response expect END but recv: %s" % line
-            )
-
-        return self.transcoder.decode(flags, buf[:-2])
-
-    def _decode_collection(self, type):
-        if type == "bop":
-            values = {}
-        elif type == "sop":
-            values = set()
-        else:  # lop
-            values = []
-
-        while True:
-            line = self.handle.readline()
-            if line[:5] != b"VALUE" and line[:5] != b"COUNT":
-                return (line, values)
-
-            if line[:5] == b"VALUE":
-                resp, flags, count = line.split()
-                flags = int(flags)
-                count = int(count)
-            elif line[:5] == b"COUNT":
-                cmd, count = line.split(b"=")
-                return (cmd, int(count))
-
-            for i in range(0, count):
-                line = self.handle.readline()
-                if type == "bop":  # bop get
-                    bkey, eflag, length_buf = line.split(b" ", 2)
-
-                    if eflag.isdigit():  # eflag not exist
-                        length = eflag
-                        eflag = None
-                        buf = length_buf
-                    else:
-                        eflag = eflag.decode("utf-8")
-                        length, buf = length_buf.split(b" ", 1)
-
-                    if bkey.isdigit():
-                        bkey = int(bkey)
-                    else:
-                        bkey = bkey.decode("utf-8")
-
-                    val = self.transcoder.decode(flags, buf)
-                    values[bkey] = (eflag, val)
-                elif type == "lop":
-                    length, buf = line.split(b" ", 1)
-                    val = self.transcoder.decode(flags, buf)
-                    values.append(val)
-                else:  # sop
-                    length, buf = line.split(b" ", 1)
-                    val = self.transcoder.decode(flags, buf)
-                    values.add(val)
-
-        return None
-
-    def _decode_bop_mget(self):
-        values = {}
-        missed_keys = []
-
-        while True:
-            line = self.handle.readline()
-            if line[:11] == b"MISSED_KEYS":
-                dummy, count = line.split(b" ")
-                count = int(count)
-                for i in range(0, count):
-                    line = self.handle.readline()
-                    missed_keys.append(line.decode("utf-8"))
-
-                continue
-
-            if line[:5] != b"VALUE" and line[:5] != b"COUNT":
-                return (line, values, missed_keys)
-
-            ret = line.split()
-            key = ret[1].decode("utf-8")
-            status = ret[2]
-
-            if status == b"NOT_FOUND":
-                missed_keys.append(key)
-                continue
-
-            count = 0
-            if len(ret) == 5:
-                flags = int(ret[3])
-                count = int(ret[4])
-
-            val = {}
-            for i in range(0, count):
-                line = self.handle.readline()
-                element, bkey, eflag, length_buf = line.split(b" ", 3)
-
-                if eflag.isdigit():  # eflag not exist
-                    length = eflag
-                    eflag = None
-                    buf = length_buf
-                else:
-                    eflag = eflag.decode("utf-8")
-                    length, buf = length_buf.split(b" ", 1)
-
-                if bkey.isdigit():
-                    bkey = int(bkey)
-                else:
-                    bkey = bkey.decode("utf-8")
-
-                ret = self.transcoder.decode(flags, buf)
-                val[bkey] = (eflag, ret)
-
-            values[key] = val
-
-        return None
-
-    def _decode_bop_smget(self):
-        values = []
-        missed_keys = []
-
-        while True:
-            line = self.handle.readline()
-            if line[:11] == b"MISSED_KEYS":
-                dummy, count = line.split(b" ")
-                count = int(count)
-                for i in range(0, count):
-                    line = self.handle.readline()
-                    missed_keys.append(line.decode("utf-8"))
-
-                continue
-
-            if line[:5] != b"VALUE" and line[:5] != b"COUNT":
-                return (line, values, missed_keys)
-
-            ret = line.split()
-            count = int(ret[1])
-
-            for i in range(0, count):
-                line = self.handle.readline()
-                key, flags, bkey, eflag, length_buf = line.split(b" ", 4)
-
-                if eflag.isdigit():  # eflag not exist
-                    length = eflag
-                    eflag = None
-                    buf = length_buf
-                else:
-                    eflag = eflag.decode("utf-8")
-                    length, buf = length_buf.split(b" ", 1)
-
-                key = key.decode("utf-8")
-
-                if bkey.isdigit():
-                    bkey = int(bkey)
-                else:
-                    bkey = bkey.decode("utf-8")
-
-                val = self.transcoder.decode(int(flags), buf)
-                values.append((bkey, key, eflag, val))
-
-        return None
+    def bop_decr(self, key, bkey, value, noreply=False, pipe=False):
+        return self.commands.btree.decr(key, bkey, value, noreply, pipe)
