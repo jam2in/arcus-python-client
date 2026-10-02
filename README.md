@@ -34,9 +34,18 @@ publish a release to a package index.
 ```text
 src/
   arcus/
+    __init__.py        # Public class exports, including Arcus and ArcusLocator
     client.py          # Arcus lifecycle and public kv/lop/sop/bop objects
-    api/               # KV/List/Set/BTree APIs and routed request execution
-    _compat/           # Deprecated flat client and node command adapters
+    api/
+      kv.py            # client.kv: KeyValueAPI
+      list.py          # client.lop: ListAPI
+      set.py           # client.sop: SetAPI
+      btree.py         # client.bop: BTreeAPI, including multi-node queries
+      executor.py      # Shared node lookup and key grouping through the locator
+    _compat/
+      client.py        # Deprecated flat methods such as client.bop_delete()
+      node.py          # Deprecated node command and lifecycle adapters
+    _deprecation.py    # Shared @deprecated decorator and migration warnings
     _logging.py        # Standard logging under the arcus logger
     routing.py         # Consistent hash ring and locator lifecycle
     discovery.py       # ZooKeeper sessions, watches and member snapshots
@@ -60,19 +69,35 @@ tests/
 tools/                 # Source-only administration utilities
 benchmarks/            # Client comparisons and profiling
 stability/             # Isolated fault and resource experiments
-docs/                  # Validation scope and acceptance criteria
+docs/                  # Architecture, API migration and validation guides
 ```
 
-Implementation modules own their responsibilities; `arcus.__init__` exposes the
-public classes. Applications can import these public classes or use their specific modules.
-The former flat `arcus_mc_node` module is deprecated. Install the package, including an editable install for
-development, before running it from a checkout.
+`Arcus` composes one API object per data type: `client.kv`, `client.lop`,
+`client.sop` and `client.bop`. Each object exposes explicit methods such as
+`client.bop.delete(...)` and shares the same `RequestExecutor`. `client.py` owns
+this composition and the `connect()`/`disconnect()` entry points. List and Set
+APIs also provide `alloc()` and `wrap()` for the Python collection wrappers in
+`collections.py`.
 
-The facade composes data-type APIs, command objects submit immutable requests,
-and response objects return decoded values to the node for operation completion.
-ZooKeeper discovery publishes membership snapshots to a separate hash ring through
-the locator. See [object responsibilities and request flow](docs/architecture.md)
-for the collaboration boundaries, state ownership and compatibility details.
+For `client.bop.delete(...)`, `BTreeAPI` asks the executor to select a node through
+the locator, then calls `node.commands.btree.delete(...)`. The command object
+encodes the request and submits an immutable `CommandRequest` to the node. The
+node manages transport and pending operations; response objects decode replies
+and return results to the node, which completes the caller's `ArcusOperation`.
+ZooKeeper discovery supplies membership snapshots to the locator and hash ring
+used for node selection.
+
+`Arcus` inherits `LegacyArcusAPI` from `_compat/client.py` to retain flat methods
+such as `client.bop_delete(...)`. These methods emit `DeprecationWarning` and
+forward to the corresponding API object. `ArcusMCNode` similarly inherits
+`LegacyNodeCommands` from `_compat/node.py`. New namespace calls go directly to
+the command objects. The former `arcus_mc_node` module preserves old imports with
+a deprecation warning; `arcus.__init__` exposes the current public classes.
+
+See [object responsibilities and request flow](docs/architecture.md) for state
+ownership and collaboration details, and [the migration guide](docs/migration.md)
+for old-to-new API mappings and logging configuration. Install the package,
+including an editable install for development, before running it from a checkout.
 
 ## Usage
 
