@@ -1,0 +1,14 @@
+services:
+  stability:
+    build:
+      context: .
+      dockerfile: stability/Dockerfile
+      args:
+        BASE_TEST_IMAGE: arcus-python-stability-tests
+    init: true
+    environment:
+      ARCUS_TEST_ZOOKEEPER: zookeeper:2181
+      ARCUS_TEST_SERVICE_CODE: python-client-test
+      ARCUS_STABILITY_SOAK_SECONDS: ${ARCUS_STABILITY_SOAK_SECONDS:-120}
+    volumes:
+      - ${ARCUS_TEST_RESULTS}:/results
