@@ -413,8 +413,11 @@ class Harness:
 
         def traffic():
             revision = 0
-            key = PREFIX + ":membership-traffic"
             while not stop.is_set():
+                # Routing changes can expose an older value for a reused key on
+                # another node. Unique revisions make a remap either a miss or
+                # this request's value, without misclassifying cache behavior.
+                key = f"{PREFIX}:membership-traffic:{revision}"
                 expected = f"membership:{revision}"
                 try:
                     self.call(

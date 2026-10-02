@@ -29,7 +29,9 @@ The runner exercises Linux `epoll` against two Arcus 1.16.1 nodes and ZooKeeper
 - Cache-node graceful stop, forced kill, restart, actual membership comparison,
   manually emptying membership, defined empty-ring errors, and restoration.
   A background caller continues throughout these changes and distinguishes routing
-  cache misses from defined connection errors and incorrect values.
+  cache misses from defined connection errors and incorrect values. Membership
+  traffic uses a new key for each revision: a reused key can legitimately expose
+  an older value on another cache node after a routing change.
 - A short ZooKeeper disconnect retaining the session and a disconnect longer than
   the negotiated session timeout. A `LOST` event and changed session ID establish
   session expiration. Membership changes during the outage and again after recovery
