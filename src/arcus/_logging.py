@@ -16,31 +16,36 @@
 #
 
 
-"""Optional diagnostic logging shared by client components."""
+"""DEBUG diagnostics controlled by the application's ``arcus`` logger settings."""
 
-import datetime
+import logging
 
-g_log = False
+from ._deprecation import deprecated
 
 
+_logger = logging.getLogger("arcus")
+_logger.addHandler(logging.NullHandler())
+
+
+@deprecated(
+    "enable_log() is deprecated; use logging.getLogger('arcus').setLevel(logging.DEBUG) "
+    "or logging.WARNING instead."
+)
 def enable_log(flag=True):
-    global g_log
-    g_log = flag
+    """Set the diagnostic level to DEBUG, or WARNING when disabled.
+
+    This compatibility helper never installs output handlers. Applications can
+    configure the named logger directly instead; its initial level is inherited.
+    """
+    _logger.setLevel(logging.DEBUG if flag else logging.WARNING)
 
 
 def arcuslog(caller, *param):
-    global g_log
-
-    if g_log:
-        str = ""
-        if caller:
-            str = "[%s - %s(%s)] " % (
-                datetime.datetime.now(),
-                caller.__class__.__name__,
-                hex(id(caller)),
-            )
-
-        for p in param:
-            str += repr(p)
-
-        print(str)
+    """Emit caller context and diagnostic parts without eager value formatting."""
+    if not _logger.isEnabledFor(logging.DEBUG):
+        return
+    message = "%r" * len(param)
+    if caller is not None:
+        message = "[%s(%#x)] " + message
+        param = (type(caller).__name__, id(caller), *param)
+    _logger.debug(message, *param, stacklevel=2)
