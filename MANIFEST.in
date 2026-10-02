@@ -1,0 +1,12 @@
+include AUTHORS ChangeLog compose.yaml Dockerfile.test .dockerignore
+recursive-include tests *.py *.md
+recursive-include scripts *.sh
+recursive-include docs *.md
+recursive-include tools *.py *.md
+recursive-include benchmarks *.py *.sh *.md *.yaml *.xml *.java *.dockerignore Dockerfile
+recursive-include stability *.py *.sh *.md *.yaml Dockerfile
+exclude AGENTS.md
+prune plan
+prune .github
+prune build
+prune dist

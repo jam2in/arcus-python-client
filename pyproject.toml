@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arcus-python-client"
+version = "1.0.0"
+description = "Python client for the Arcus distributed cache"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE", "AUTHORS"]
+classifiers = [
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = ["kazoo>=2.10,<3"]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10", "pytest-timeout>=2.3,<3"]
+dev = [
+    "arcus-python-client[test]",
+    "build>=1.2,<2",
+    "ruff==0.16.10",
+    "twine>=6,<7",
+]
+
+[project.urls]
+Homepage = "https://github.com/jam2in/arcus-python-client"
+Repository = "https://github.com/jam2in/arcus-python-client"
+Issues = "https://github.com/jam2in/arcus-python-client/issues"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = ["arcus_mc_node"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["arcus", "arcus.*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["integration", "legacy"]
+addopts = "--strict-config --strict-markers --import-mode=importlib"
+markers = ["integration: requires an isolated Arcus and ZooKeeper service on Linux"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.format]
+indent-style = "space"
+quote-style = "double"
+line-ending = "lf"
