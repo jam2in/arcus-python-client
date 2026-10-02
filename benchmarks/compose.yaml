@@ -1,0 +1,75 @@
+name: arcus-python-client-benchmark
+
+services:
+  zookeeper:
+    image: zookeeper:3.9.4@sha256:dfa9ba46d14bd52bcb3c1dac3ba91f179cf4cebf7ee576e1c2df09c68fc1d30d
+    environment:
+      ZOO_4LW_COMMANDS_WHITELIST: ruok
+      ZOO_ADMINSERVER_ENABLED: "false"
+    healthcheck:
+      test: [CMD-SHELL, "echo ruok | nc -w 2 localhost 2181 | grep -q imok"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  register:
+    image: jam2in/zkcli:3.5.9@sha256:69434893acc53b9509a74d20d600b4de5a606cc8804fb63cb69243fc5b4cc549
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+      cache1:
+        condition: service_started
+    environment:
+      ZK_ENSEMBLE: zookeeper:2181
+      SERVICE_CODE: python-benchmark
+      IS_REPL: "0"
+    # Arcus identifies itself by IP. Resolve the running containers before
+    # registration, then release their startup barrier on the shared volume.
+    entrypoint: [/bin/bash, -ec]
+    command:
+      - |
+        cache1_ip=$$(getent ahostsv4 cache1 | awk 'NR == 1 {print $$1}')
+        test -n "$$cache1_ip"
+        export CACHENODES="$$cache1_ip:11211"
+        ./entrypoint.sh
+        touch /registration/ready
+    volumes:
+      - registration:/registration
+
+  cache1:
+    image: jam2in/arcus-memcached:1.16.1@sha256:d33fb745856868f2a14a9ec8fa0e672c0cae5c2dfb2560cf5c025b3dc65153cb
+    cpus: 1
+    mem_limit: 256m
+    hostname: cache1
+    entrypoint: [/bin/sh, -ec]
+    command:
+      - |
+        while [ ! -f /registration/ready ]; do sleep 1; done
+        exec memcached -E /arcus/lib/default_engine.so -X /arcus/lib/ascii_scrub.so -u root -D : -r -m 64 -p 11211 -z zookeeper:2181
+    volumes:
+      - registration:/registration:ro
+    healthcheck:
+      test: [CMD-SHELL, "printf 'version\\r\\n' | nc -w 1 localhost 11211 | grep -q '^VERSION'"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  benchmark:
+    build:
+      context: ..
+      dockerfile: benchmarks/Dockerfile
+    init: true
+    cpus: 2
+    mem_limit: 1g
+    cap_add: [SYS_PTRACE]
+    depends_on:
+      register:
+        condition: service_completed_successfully
+      cache1:
+        condition: service_healthy
+    volumes:
+      - ${ARCUS_BENCH_RESULTS:?Set ARCUS_BENCH_RESULTS}:/results
+
+volumes:
+  registration:
