@@ -19,6 +19,7 @@
 """Shared collection framing; family handlers determine element/result types."""
 
 from ...exceptions import (
+    ArcusProtocolException,
     CollectionExist,
     CollectionIndex,
     CollectionOverflow,
@@ -32,6 +33,7 @@ class CollectionResponses:
 
     def created(self):
         line = self.reader.readline()
+        self.reader.finish()
         if line == b"CREATED":
             return True
         if line == b"EXISTS":
@@ -42,6 +44,7 @@ class CollectionResponses:
         line = self.reader.readline()
         if line[:8] == b"RESPONSE":
             return self.reader.pipeline(line)
+        self.reader.finish()
         if line == b"STORED":
             return True
         if line == b"NOT_FOUND":
@@ -54,21 +57,40 @@ class CollectionResponses:
             raise CollectionIndex()
         return False
 
-    def read(self, values, consume):
+    def read(
+        self, values, consume, *, allow_count=False, allow_trimmed=False, errors=()
+    ):
         """Read common frames and let the family consume each element in order."""
-        while True:
-            line = self.reader.readline()
-            if line[:5] not in (b"VALUE", b"COUNT"):
-                return line, values
-            if line[:5] == b"COUNT":
-                command, count = line.split(b"=")
-                return command, int(count)
-            _, flags, count = line.split()
-            flags, count = int(flags), int(count)
-            for _ in range(count):
-                consume(values, flags, self.reader.readline())
+        line = self.reader.readline()
+        if line in (
+            b"NOT_FOUND",
+            b"TYPE_MISMATCH",
+            b"UNREADABLE",
+            b"OUT_OF_RANGE",
+            b"NOT_FOUND_ELEMENT",
+            *errors,
+        ):
+            self.reader.finish()
+            return line, values
+        if allow_count and line.startswith(b"COUNT="):
+            count = self.reader.number(line[len(b"COUNT=") :])
+            self.reader.finish()
+            return b"COUNT", count
+        fields = line.split()
+        if len(fields) != 3 or fields[0] != b"VALUE":
+            raise ArcusProtocolException(f"invalid collection header: {line!r}")
+        flags, count = map(self.reader.number, fields[1:])
+        for _ in range(count):
+            consume(values, flags)
+        terminal = self.reader.readline()
+        if terminal not in (b"END", b"DELETED", b"DELETED_DROPPED") and not (
+            allow_trimmed and terminal == b"TRIMMED"
+        ):
+            raise ArcusProtocolException(f"invalid collection terminator: {terminal!r}")
+        self.reader.finish()
+        return terminal, values
 
-    def value(self, flags, line):
-        # Preserve the existing line-framed collection protocol behavior.
-        _, payload = line.split(b" ", 1)
+    def value(self, flags):
+        length = self.reader.number(self.reader.token())
+        payload = self.reader.payload(length)
         return self.reader.decode(flags, payload)

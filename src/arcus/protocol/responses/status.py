@@ -29,6 +29,7 @@ class StatusResponses:
         line = self.reader.readline()
         if line[:8] == b"RESPONSE":
             return self.reader.pipeline(line)
+        self.reader.finish()
         if line == b"STORED":
             return True
         if line == b"NOT_FOUND":
@@ -47,6 +48,7 @@ class StatusResponses:
         line = self.reader.readline()
         if line[:8] == b"RESPONSE":
             return self.reader.pipeline(line)
+        self.reader.finish()
         if line in (b"DELETED", b"DELETED_DROPPED", b"NOT_FOUND"):
             return True
         if line == b"TYPE_MISMATCH":

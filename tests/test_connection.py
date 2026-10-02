@@ -129,6 +129,30 @@ class ConnectionTests(ConnectionTestCase):
             connection.recv(-1)
         sock.recv.assert_not_called()
 
+    def test_element_tokens_and_payload_keep_partial_socket_boundaries(self):
+        connection, _ = self.make_connection(
+            b"0x0", b"1 0x", b"02 4 a\r", b"\nb\r\nEND\r\n"
+        )
+        self.assertEqual(connection.read_token(), b"0x01")
+        self.assertEqual(connection.read_token(), b"0x02")
+        self.assertEqual(connection.read_token(), b"4")
+        self.assertEqual(connection.recv(6), b"a\r\nb\r\n")
+        self.assertEqual(connection.readline(), b"END")
+
+    def test_element_token_cannot_cross_an_unexpected_line_end(self):
+        for chunks in ((b"1\r\nnext field",), (b"1\r", b"\nnext field")):
+            with self.subTest(chunks=chunks):
+                connection, _ = self.make_connection(*chunks)
+                with self.assertRaises(ArcusProtocolException):
+                    connection.read_token()
+
+    def test_eof_during_element_token_disconnects(self):
+        connection, sock = self.make_connection(b"0x01", b"")
+        with self.assertRaises(ArcusNodeConnectionException):
+            connection.read_token()
+        self.assertTrue(connection.disconnected())
+        sock.close.assert_called_once_with()
+
 
 class ValueResponseTests(ConnectionTestCase):
     def test_get_and_gets_preserve_normal_miss(self):

@@ -32,6 +32,18 @@ class ByteConnection:
     def recv(self, size):
         return self.stream.read(size)
 
+    def read_token(self):
+        token = bytearray()
+        while True:
+            byte = self.stream.read(1)
+            if not byte:
+                raise ArcusNodeConnectionException("end of response")
+            if byte == b" ":
+                return bytes(token)
+            if byte in (b"\r", b"\n"):
+                raise ArcusProtocolException("incomplete element header")
+            token.extend(byte)
+
 
 def handlers(response):
     return ResponseHandlers(ByteConnection(response), ArcusTranscoder())

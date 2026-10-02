@@ -26,13 +26,16 @@ class AdminResponses:
         self.reader = reader
 
     def ok(self):
-        return self.reader.readline() == b"OK"
+        line = self.reader.readline()
+        self.reader.finish()
+        return line == b"OK"
 
     def stats(self):
         values = {}
         while True:
             line = self.reader.readline()
             if line == b"END":
+                self.reader.finish()
                 return values
             fields = line.split(b" ", 2)
             if len(fields) != 3 or fields[0] != b"STAT":

@@ -29,8 +29,8 @@ class SetResponses:
     def decode(self):
         return self.collection.read(set(), self._add)
 
-    def _add(self, values, flags, line):
-        values.add(self.collection.value(flags, line))
+    def _add(self, values, flags):
+        values.add(self.collection.value(flags))
 
     def get(self):
         status, values = self.decode()
@@ -45,4 +45,8 @@ class SetResponses:
         return values
 
     def exist(self):
-        return self.reader.readline() == b"EXIST"
+        line = self.reader.readline()
+        if line[:8] == b"RESPONSE":
+            return self.reader.pipeline(line)
+        self.reader.finish()
+        return line == b"EXIST"

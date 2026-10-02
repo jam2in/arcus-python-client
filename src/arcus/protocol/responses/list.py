@@ -29,8 +29,8 @@ class ListResponses:
     def decode(self):
         return self.collection.read([], self._append)
 
-    def _append(self, values, flags, line):
-        values.append(self.collection.value(flags, line))
+    def _append(self, values, flags):
+        values.append(self.collection.value(flags))
 
     def get(self):
         status, values = self.decode()

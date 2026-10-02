@@ -40,6 +40,7 @@ class KVResponses:
     def header(self, field_count):
         line = self.reader.readline()
         if line == b"END":
+            self.reader.finish()
             return None
         fields = line.split()
         if (

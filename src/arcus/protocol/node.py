@@ -67,8 +67,16 @@ class ArcusMCNode:
 
     def disconnect(self):
         with self._io_lock:
-            self.node_allocator.worker.poll.unregister_node(self)
-            self.handle.disconnect()
+            first_error = None
+            for cleanup in (
+                lambda: self.node_allocator.worker.poll.unregister_node(self),
+                self.handle.disconnect,
+            ):
+                try:
+                    cleanup()
+                except Exception as error:
+                    if first_error is None:
+                        first_error = error
             with self.lock:
                 self._generation += 1
                 ops = list(self._pending | set(self.ops))
@@ -76,14 +84,20 @@ class ArcusMCNode:
                 self.ops = []
             for op in ops:
                 op.set_invalid()
+            if first_error is not None:
+                raise first_error
 
     def _fail_operation(self, op, error):
         with self.lock:
             self._pending.discard(op)
             if op in self.ops:
                 self.ops.remove(op)
-        self.disconnect()
-        op.set_result(error)
+        try:
+            self.disconnect()
+        except Exception as cleanup_error:
+            arcuslog(self, "operation cleanup failed: %s" % str(cleanup_error))
+        finally:
+            op.set_result(error)
 
     def close(self):
         with self._io_lock:
@@ -135,9 +149,11 @@ class ArcusMCNode:
                     ops = list(self._pending)
                     self._pending.clear()
                     self.ops = []
-                self.disconnect()
-                for op in ops:
-                    op.set_result(socket.timeout("operation deadline exceeded"))
+                try:
+                    self.disconnect()
+                finally:
+                    for op in ops:
+                        op.set_result(socket.timeout("operation deadline exceeded"))
 
     def add_op(self, cmd, full_cmd, callback, noreply=False):
         op = ArcusOperation(self, full_cmd, callback)
@@ -171,6 +187,7 @@ class ArcusMCNode:
                     return
                 try:
                     self.handle.deadline = op.deadline
+                    self.responses.reader.begin()
                     ret = op.callback()
                 except (
                     ArcusNodeConnectionException,
@@ -182,6 +199,9 @@ class ArcusMCNode:
                     return
                 except Exception as error:
                     arcuslog(self, "do op failed: %s" % str(error))
+                    if not self.responses.reader.complete:
+                        self._fail_operation(op, error)
+                        return
                     ret = error
                 finally:
                     self.handle.deadline = None

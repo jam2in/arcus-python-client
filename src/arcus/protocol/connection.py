@@ -101,10 +101,21 @@ class Connection(object):
         return index >= 0
 
     def readline(self):
+        return self._read_until(b"\r\n")
+
+    def read_token(self):
+        """Read a space-terminated element field without consuming its payload."""
+        return self._read_until(b" ")
+
+    def _read_until(self, separator):
         buf = self.buffer
 
         while True:
-            index = buf.find(b"\r\n")
+            index = buf.find(separator)
+            if separator == b" ":
+                line_end = buf.find(b"\r\n")
+                if line_end >= 0 and (index < 0 or line_end < index):
+                    raise ArcusProtocolException("incomplete collection element header")
             if index >= 0:
                 break
 
@@ -120,9 +131,9 @@ class Connection(object):
 
             buf += data
 
-        self.buffer = buf[index + 2 :]
+        self.buffer = buf[index + len(separator) :]
 
-        arcuslog(self, "readline: ", buf[:index])
+        arcuslog(self, "read field: ", buf[:index])
         return buf[:index]
 
     def recv(self, rlen):
