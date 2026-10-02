@@ -1,0 +1,75 @@
+name: Python client checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: python -m pip install '.[test]'
+      - name: Test the installed package outside the checkout
+        run: |
+          cd "$RUNNER_TEMP"
+          python -m pytest "$GITHUB_WORKSPACE/tests" -c "$GITHUB_WORKSPACE/pyproject.toml" --timeout=30 --junitxml="$GITHUB_WORKSPACE/build/unit.xml"
+      - name: Preserve unit test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-python-${{ matrix.python-version }}
+          path: build/unit.xml
+          retention-days: 14
+
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: python -m pip install '.[dev]'
+      - run: ruff format --check .
+      - run: python -m build
+      - run: python -m twine check dist/*
+      - name: Test the installed wheel outside the checkout
+        run: |
+          python -m venv "$RUNNER_TEMP/wheel-check"
+          "$RUNNER_TEMP/wheel-check/bin/python" -m pip install dist/*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/wheel-check/bin/python" -m pip check
+          "$RUNNER_TEMP/wheel-check/bin/python" -c 'from arcus import Arcus, ArcusTranscoder; from arcus_mc_node import ArcusMCNodeAllocator; codec = ArcusTranscoder(); flags, _, value = codec.encode("installed wheel"); assert codec.decode(flags, value) == "installed wheel"'
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - run: ./scripts/test-integration.sh
+      - name: Show service logs on failure
+        if: failure()
+        run: find build/integration -name services.log -exec cat {} +
+      - name: Preserve integration diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: integration-results
+          path: build/integration/
+          retention-days: 14
