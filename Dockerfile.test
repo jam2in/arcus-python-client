@@ -1,0 +1,24 @@
+FROM python:3.11-slim-bookworm AS wheel
+
+WORKDIR /build
+COPY pyproject.toml README.md LICENSE AUTHORS ChangeLog ./
+COPY src/ ./src/
+RUN python -m pip wheel --no-deps --wheel-dir /wheels .
+
+FROM python:3.11-slim-bookworm
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+COPY --from=wheel /wheels /wheels
+RUN package_wheel="$(find /wheels -name '*.whl')" \
+    && python -m pip install --no-cache-dir "${package_wheel}[test]"
+
+# The source modules are absent here: tests exercise the installed wheel.
+WORKDIR /validation
+COPY pyproject.toml ./
+COPY tests/ ./tests/
+
+# Bound the whole process, including failed fixture setup or thread shutdown.
+ENTRYPOINT ["timeout", "--signal=TERM", "--kill-after=10s", "180s"]
+CMD ["python", "-m", "pytest", "tests/integration", "-v", "--timeout=45", "--timeout-method=thread", "--junitxml=/results/integration.xml"]
