@@ -1,5 +1,7 @@
 # arcus-python-client
 
+**English** | [한국어](README.ko.md)
+
 A Python client for the [Arcus cache](https://github.com/naver/arcus).
 
 ## Requirements
@@ -32,72 +34,21 @@ publish a release to a package index.
 ## Project structure
 
 ```text
-src/
-  arcus/
-    __init__.py        # Public class exports, including Arcus and ArcusLocator
-    client.py          # Arcus lifecycle and public kv/lop/sop/bop objects
-    api/
-      kv.py            # client.kv: KeyValueAPI
-      list.py          # client.lop: ListAPI
-      set.py           # client.sop: SetAPI
-      btree.py         # client.bop: BTreeAPI, including multi-node queries
-      executor.py      # Shared node lookup and key grouping through the locator
-    _compat/
-      client.py        # Deprecated flat methods such as client.bop_delete()
-      node.py          # Deprecated node command and lifecycle adapters
-    _deprecation.py    # Shared @deprecated decorator and migration warnings
-    _logging.py        # Standard logging under the arcus logger
-    routing.py         # Consistent hash ring and locator lifecycle
-    discovery.py       # ZooKeeper sessions, watches and member snapshots
-    transcoder.py      # Value encoding and decoding
-    operation.py       # Asynchronous results and aggregation
-    collections.py     # Python List/Set wrappers
-    exceptions.py      # Public error types
-    protocol/
-      commands/        # Per-type command objects and shared collection encoding
-      responses/       # Per-type response objects and shared byte reader
-      request.py       # Immutable command message and submit capability
-      connection.py    # Socket I/O, buffering and timeouts
-      node.py          # Transport and operation lifetime
-      worker.py        # Request worker and Linux epoll loop
-      allocator.py     # Node construction and worker lifecycle
-      filter.py        # B+Tree element-flag filters
-  arcus_mc_node.py      # Deprecated compatibility imports
-tests/
-  integration/         # Real Arcus and ZooKeeper tests
+src/arcus/             # Client package
+  api/                 # Key/value, List, Set and B+Tree APIs
+  protocol/            # Arcus protocol and network transport
+tests/                 # Unit tests
+  integration/         # Tests against real Arcus and ZooKeeper
   legacy/              # Original manual smoke script
-tools/                 # Source-only administration utilities
-benchmarks/            # Client comparisons and profiling
-stability/             # Isolated fault and resource experiments
-docs/                  # Architecture, API migration and validation guides
+tools/                 # Standalone administration utilities
+benchmarks/            # Performance comparisons and profiling
+stability/             # Fault, recovery and sustained-load experiments
+docs/                  # Architecture, migration and validation guides
 ```
 
-`Arcus` composes one API object per data type: `client.kv`, `client.lop`,
-`client.sop` and `client.bop`. Each object exposes explicit methods such as
-`client.bop.delete(...)` and shares the same `RequestExecutor`. `client.py` owns
-this composition and the `connect()`/`disconnect()` entry points. List and Set
-APIs also provide `alloc()` and `wrap()` for the Python collection wrappers in
-`collections.py`.
-
-For `client.bop.delete(...)`, `BTreeAPI` asks the executor to select a node through
-the locator, then calls `node.commands.btree.delete(...)`. The command object
-encodes the request and submits an immutable `CommandRequest` to the node. The
-node manages transport and pending operations; response objects decode replies
-and return results to the node, which completes the caller's `ArcusOperation`.
-ZooKeeper discovery supplies membership snapshots to the locator and hash ring
-used for node selection.
-
-`Arcus` inherits `LegacyArcusAPI` from `_compat/client.py` to retain flat methods
-such as `client.bop_delete(...)`. These methods emit `DeprecationWarning` and
-forward to the corresponding API object. `ArcusMCNode` similarly inherits
-`LegacyNodeCommands` from `_compat/node.py`. New namespace calls go directly to
-the command objects. The former `arcus_mc_node` module preserves old imports with
-a deprecation warning; `arcus.__init__` exposes the current public classes.
-
-See [object responsibilities and request flow](docs/architecture.md) for state
-ownership and collaboration details, and [the migration guide](docs/migration.md)
-for old-to-new API mappings and logging configuration. Install the package,
-including an editable install for development, before running it from a checkout.
+See [the architecture guide](docs/architecture.md) for internal responsibilities
+and request flow, and [the migration guide](docs/migration.md) for API changes
+and logging configuration.
 
 ## Usage
 

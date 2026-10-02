@@ -1,4 +1,4 @@
-include AUTHORS ChangeLog compose.yaml Dockerfile.test .dockerignore
+include AUTHORS ChangeLog README.ko.md compose.yaml Dockerfile.test .dockerignore
 recursive-include tests *.py *.md
 recursive-include scripts *.sh
 recursive-include docs *.md
