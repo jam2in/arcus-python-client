@@ -15,8 +15,8 @@ def completed(values, missed=()):
 
 def client_for(first_values, second_values):
     first, second = Mock(), Mock()
-    first.bop_smget.return_value = completed(first_values, ["missing-z"])
-    second.bop_smget.return_value = completed(second_values, ["missing-a"])
+    first.commands.btree.smget.return_value = completed(first_values, ["missing-z"])
+    second.commands.btree.smget.return_value = completed(second_values, ["missing-a"])
     locator = Mock()
     locator.get_node.side_effect = {"a": first, "b": second}.__getitem__
     return Arcus(locator), first, second
@@ -42,19 +42,19 @@ def test_smget_applies_direction_and_page_once_across_nodes(
     second_values = [(bkey, "b", None, str(bkey)) for bkey in second]
     client, first_node, second_node = client_for(first_values, second_values)
 
-    operation = client.bop_smget(["a", "b"], interval, offset=offset, count=count)
+    operation = client.bop.smget(["a", "b"], interval, offset=offset, count=count)
 
     assert [element[0] for element in operation.get_result()] == expected
     assert operation.get_result() is operation.get_result()
     assert operation.get_missed_key() == ["missing-a", "missing-z"]
-    assert first_node.bop_smget.call_args.args == (
+    assert first_node.commands.btree.smget.call_args.args == (
         ["a"],
         interval,
         None,
         0,
         (offset or 0) + count,
     )
-    assert second_node.bop_smget.call_args.args == (
+    assert second_node.commands.btree.smget.call_args.args == (
         ["b"],
         interval,
         None,
@@ -70,11 +70,11 @@ def test_single_node_smget_does_not_apply_server_offset_twice(interval):
     values = [(3, "a", None, "third"), (4, "a", None, "fourth")]
     client, first, second = client_for(values, [])
 
-    result = client.bop_smget(["a"], interval, offset=2, count=2).get_result()
+    result = client.bop.smget(["a"], interval, offset=2, count=2).get_result()
 
     assert result == values
-    first.bop_smget.assert_called_once_with(["a"], interval, None, 2, 2)
-    second.bop_smget.assert_not_called()
+    first.commands.btree.smget.assert_called_once_with(["a"], interval, None, 2, 2)
+    second.commands.btree.smget.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -109,7 +109,7 @@ def test_hex_smget_uses_binary_bkey_order_not_hex_spelling_or_integer_order(
         [(bkey, "b", None, b"value") for bkey in second],
     )
 
-    result = client.bop_smget(["a", "b"], interval, count=3).get_result()
+    result = client.bop.smget(["a", "b"], interval, count=3).get_result()
 
     assert [element[0] for element in result] == expected
 
@@ -120,7 +120,7 @@ def test_hex_smget_uses_binary_bkey_order_not_hex_spelling_or_integer_order(
 def test_equal_bkeys_use_cache_key_as_tiebreaker_in_query_direction(interval, expected):
     client, _, _ = client_for([(1, "z", None, {})], [(1, "a", b"flag", object())])
 
-    result = client.bop_smget(["a", "b"], interval, count=2).get_result()
+    result = client.bop.smget(["a", "b"], interval, count=2).get_result()
 
     assert [element[1] for element in result] == expected
 
@@ -138,7 +138,7 @@ def test_smget_merge_never_compares_payloads_or_element_flags():
 def test_empty_smget_keeps_empty_result_even_with_nonzero_offset():
     locator = Mock()
 
-    operation = Arcus(locator).bop_smget([], (10, 0), offset=2, count=3)
+    operation = Arcus(locator).bop.smget([], (10, 0), offset=2, count=3)
 
     assert operation.get_result() == []
     assert operation.get_missed_key() == []

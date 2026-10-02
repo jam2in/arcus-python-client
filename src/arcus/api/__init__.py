@@ -1,4 +1,4 @@
-"""Internal API collaborators used by the public Arcus facade."""
+"""Data-type APIs exposed through the Arcus client's public namespaces."""
 
 from .btree import BTreeAPI
 from .executor import RequestExecutor

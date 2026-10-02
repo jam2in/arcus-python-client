@@ -30,7 +30,7 @@ def test_disconnect_attempts_all_cleanup_and_invalidates_pending_after_errors():
     unregister_error = OSError("unregister failed")
     allocator.worker.poll.unregister_node.side_effect = unregister_error
     sock.close.side_effect = OSError("socket close failed")
-    operations = [node.get("first"), node.get("second")]
+    operations = [node.commands.kv.get("first"), node.commands.kv.get("second")]
     generation = node._generation
     with pytest.raises(OSError) as raised:
         node.disconnect()
@@ -49,7 +49,7 @@ def test_parse_error_survives_teardown_error_and_completes_every_operation():
     node, sock, allocator = make_node()
     sock.recv.return_value = b"VALUE invalid header\r\n"
     allocator.worker.poll.unregister_node.side_effect = OSError("unregister failed")
-    first, second = node.get("first"), node.get("second")
+    first, second = node.commands.kv.get("first"), node.commands.kv.get("second")
     node.process_operation(first)
     node.process_operation(second)
     node.do_op()
@@ -66,7 +66,7 @@ def test_write_error_survives_teardown_error():
     send_error = BrokenPipeError("write failed")
     sock.sendall.side_effect = send_error
     allocator.worker.poll.unregister_node.side_effect = OSError("unregister failed")
-    operation = node.get("first")
+    operation = node.commands.kv.get("first")
     node.process_operation(operation)
     with pytest.raises(BrokenPipeError) as raised:
         operation.get_result(timeout=0.1)
@@ -78,7 +78,7 @@ def test_write_error_survives_teardown_error():
 def test_expired_operations_finish_even_when_disconnect_raises():
     node, sock, allocator = make_node()
     allocator.worker.poll.unregister_node.side_effect = OSError("unregister failed")
-    first, second = node.get("first"), node.get("second")
+    first, second = node.commands.kv.get("first"), node.commands.kv.get("second")
     first.deadline = time.monotonic() - 1
     with pytest.raises(OSError, match="unregister failed"):
         node.expire_operations()

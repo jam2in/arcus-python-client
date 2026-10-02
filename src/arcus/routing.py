@@ -22,6 +22,7 @@ import bisect
 import hashlib
 from threading import Lock
 
+from ._deprecation import deprecated
 from ._logging import arcuslog
 from .discovery import ZooKeeperDiscovery
 from .exceptions import ArcusNodeConnectionException, ArcusProtocolException
@@ -248,6 +249,10 @@ class ArcusLocator:
             if not self._closed:
                 self._ring.replace(children)
 
+    @deprecated(
+        "ArcusLocator.watch_children() is deprecated; ZooKeeperDiscovery registers "
+        "its own watches through locator.connect()."
+    )
     def watch_children(self, event):
         self._discovery.watch_children(event)
 

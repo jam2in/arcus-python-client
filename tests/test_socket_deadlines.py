@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from arcus import ArcusTranscoder
-from arcus_mc_node import ArcusMCNodeAllocator, Connection
+from arcus.protocol import ArcusMCNodeAllocator, Connection
 
 
 @contextmanager
@@ -110,7 +110,7 @@ def test_linux_epoll_terminates_silent_or_incomplete_operations(response):
         )
         node = allocator.alloc(address, "deadline")
         try:
-            operation = node.get("key")
+            operation = node.commands.kv.get("key")
             assert received.wait(1)
             started = time.monotonic()
             with pytest.raises(socket.timeout):

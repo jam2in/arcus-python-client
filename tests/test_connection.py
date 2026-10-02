@@ -11,7 +11,7 @@ from arcus import (
     ArcusProtocolException,
     ArcusTranscoder,
 )
-from arcus_mc_node import ArcusMCNode, ArcusMCPoll, Connection
+from arcus.protocol import ArcusMCNode, ArcusMCPoll, Connection
 
 
 class ConnectionTestCase(unittest.TestCase):

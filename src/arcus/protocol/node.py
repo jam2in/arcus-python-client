@@ -23,6 +23,7 @@ import threading
 import time
 from threading import Lock
 
+from .._compat.node import LegacyNodeCommands
 from .._logging import arcuslog
 from ..exceptions import (
     ArcusNodeConnectionException,
@@ -35,7 +36,7 @@ from .connection import Connection
 from .responses import ResponseHandlers
 
 
-class ArcusMCNode:
+class ArcusMCNode(LegacyNodeCommands):
     worker = None
     shutdown = False
 
@@ -105,9 +106,6 @@ class ArcusMCNode:
             self.disconnect()
         self.node_allocator.forget(self)
 
-    def disconnect_all(self):
-        self.node_allocator.close()
-
     def process_request(self, request):
         if self.handle.disconnected():
             ret = self.handle.connect()
@@ -155,11 +153,13 @@ class ArcusMCNode:
                     for op in ops:
                         op.set_result(socket.timeout("operation deadline exceeded"))
 
-    def add_op(self, cmd, full_cmd, callback, noreply=False):
-        op = ArcusOperation(self, full_cmd, callback)
+    def submit(self, request):
+        """Queue an immutable command; lifecycle and completion stay with this node."""
+        op = ArcusOperation(self, request.payload, request.response)
         arcuslog(
             self,
-            "add operation %s(%s:%s) to %s" % (full_cmd, callback, hex(id(op)), self),
+            "add operation %s(%s:%s) to %s"
+            % (request.payload, request.response, hex(id(op)), self),
         )
         with self._io_lock:
             with self.lock:
@@ -170,9 +170,9 @@ class ArcusMCNode:
                 op.deadline = time.monotonic() + getattr(
                     self.node_allocator, "operation_timeout", 5.0
                 )
-                op.noreply = noreply
+                op.noreply = request.noreply
                 self._pending.add(op)
-                if not noreply:
+                if not request.noreply:
                     self.ops.append(op)
                 self.node_allocator.worker.q.put(op)
         return op
@@ -210,118 +210,3 @@ class ArcusMCNode:
                 op.set_result(ret)
                 if not self.handle.hasline():
                     return
-
-    def submit(self, request):
-        """Queue an immutable command; lifecycle and completion stay with this node."""
-        return self.add_op(
-            request.name, request.payload, request.response, request.noreply
-        )
-
-    def get(self, key):
-        return self.commands.kv.get(key)
-
-    def gets(self, key):
-        return self.commands.kv.gets(key)
-
-    def set(self, key, val, exptime=0):
-        return self.commands.kv.set(key, val, exptime)
-
-    def cas(self, key, val, cas_id, exptime=0):
-        return self.commands.kv.cas(key, val, cas_id, exptime)
-
-    def incr(self, key, value=1):
-        return self.commands.kv.incr(key, value)
-
-    def decr(self, key, value=1):
-        return self.commands.kv.decr(key, value)
-
-    def add(self, key, val, exptime=0):
-        return self.commands.kv.add(key, val, exptime)
-
-    def append(self, key, val, exptime=0):
-        return self.commands.kv.append(key, val, exptime)
-
-    def prepend(self, key, val, exptime=0):
-        return self.commands.kv.prepend(key, val, exptime)
-
-    def replace(self, key, val, exptime=0):
-        return self.commands.kv.replace(key, val, exptime)
-
-    def delete(self, key):
-        return self.commands.kv.delete(key)
-
-    def flush_all(self):
-        return self.commands.admin.flush_all()
-
-    def get_stats(self, stat_args=None):
-        return self.commands.admin.get_stats(stat_args)
-
-    def lop_create(self, key, flags, exptime=0, noreply=False, attr=None):
-        return self.commands.list.create(key, flags, exptime, noreply, attr)
-
-    def lop_insert(self, key, index, value, noreply=False, pipe=False, attr=None):
-        return self.commands.list.insert(key, index, value, noreply, pipe, attr)
-
-    def lop_delete(self, key, range, drop=False, noreply=False, pipe=False):
-        return self.commands.list.delete(key, range, drop, noreply, pipe)
-
-    def lop_get(self, key, range, delete=False, drop=False):
-        return self.commands.list.get(key, range, delete, drop)
-
-    def sop_create(self, key, flags, exptime=0, noreply=False, attr=None):
-        return self.commands.set.create(key, flags, exptime, noreply, attr)
-
-    def sop_insert(self, key, value, noreply=False, pipe=False, attr=None):
-        return self.commands.set.insert(key, value, noreply, pipe, attr)
-
-    def sop_get(self, key, count=0, delete=False, drop=False):
-        return self.commands.set.get(key, count, delete, drop)
-
-    def sop_delete(self, key, val, drop=False, noreply=False, pipe=False):
-        return self.commands.set.delete(key, val, drop, noreply, pipe)
-
-    def sop_exist(self, key, val, pipe=False):
-        return self.commands.set.exist(key, val, pipe)
-
-    def bop_create(self, key, flags, exptime=0, noreply=False, attr=None):
-        return self.commands.btree.create(key, flags, exptime, noreply, attr)
-
-    def bop_insert(
-        self, key, bkey, value, eflag=None, noreply=False, pipe=False, attr=None
-    ):
-        return self.commands.btree.insert(key, bkey, value, eflag, noreply, pipe, attr)
-
-    def bop_upsert(
-        self, key, bkey, value, eflag=None, noreply=False, pipe=False, attr=None
-    ):
-        return self.commands.btree.upsert(key, bkey, value, eflag, noreply, pipe, attr)
-
-    def bop_update(
-        self, key, bkey, value, eflag=None, noreply=False, pipe=False, attr=None
-    ):
-        return self.commands.btree.update(key, bkey, value, eflag, noreply, pipe, attr)
-
-    def bop_delete(
-        self, key, range, filter=None, count=None, drop=False, noreply=False, pipe=False
-    ):
-        return self.commands.btree.delete(
-            key, range, filter, count, drop, noreply, pipe
-        )
-
-    def bop_get(self, key, range, filter=None, delete=False, drop=False):
-        return self.commands.btree.get(key, range, filter, delete, drop)
-
-    def bop_mget(self, key_list, range, filter=None, offset=None, count=50):
-        return self.commands.btree.mget(key_list, range, filter, offset, count)
-
-    def bop_smget(self, key_list, range, filter=None, offset=None, count=2000):
-        return self.commands.btree.smget(key_list, range, filter, offset, count)
-
-    def bop_count(self, key, range, filter):
-        return self.commands.btree.count(key, range, filter)
-
-    def bop_incr(self, key, bkey, value, noreply=False, pipe=False):
-        return self.commands.btree.incr(key, bkey, value, noreply, pipe)
-
-    def bop_decr(self, key, bkey, value, noreply=False, pipe=False):
-        return self.commands.btree.decr(key, bkey, value, noreply, pipe)

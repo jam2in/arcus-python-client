@@ -14,6 +14,7 @@ from arcus import (
     CollectionType,
 )
 from arcus.protocol.node import ArcusMCNode
+from arcus.protocol.request import CommandRequest
 
 
 def make_node(wire, chunk_size=None):
@@ -35,12 +36,12 @@ def make_node(wire, chunk_size=None):
 
 def collection_operation(node, family):
     if family == "list":
-        return node.lop_get("collection", (0, -1))
+        return node.commands.list.get("collection", (0, -1))
     if family == "set":
-        return node.sop_get("collection")
+        return node.commands.set.get("collection")
     if family == "btree":
-        return node.bop_get("collection", (0, 10))
-    return getattr(node, "bop_" + family)(["collection"], (0, 10))
+        return node.commands.btree.get("collection", (0, 10))
+    return getattr(node.commands.btree, family)(["collection"], (0, 10))
 
 
 def collection_wire(family, flags, payload):
@@ -96,7 +97,7 @@ def test_collection_payload_preserves_bytes_and_next_requests(
         collection_wire(family, flags, payload) + NEXT_RESPONSES, chunk_size
     )
     first = collection_operation(node, family)
-    present, missing = node.get("present"), node.get("missing")
+    present, missing = node.commands.kv.get("present"), node.commands.kv.get("missing")
     send_and_receive(node, [first, present, missing])
     assert first.get_result(timeout=0.1) == expected_collection(family, value)
     assert present.get_result(timeout=0.1) == "ok"
@@ -109,7 +110,7 @@ def test_collection_payload_preserves_bytes_and_next_requests(
 def test_mid_collection_codec_error_invalidates_unread_responses(family):
     node, sock = make_node(collection_wire(family, 0, b"\xff") + NEXT_RESPONSES)
     first = collection_operation(node, family)
-    present, missing = node.get("present"), node.get("missing")
+    present, missing = node.commands.kv.get("present"), node.commands.kv.get("missing")
     send_and_receive(node, [first, present, missing])
     with pytest.raises(UnicodeDecodeError):
         first.get_result(timeout=0.1)
@@ -125,7 +126,7 @@ def test_mid_collection_codec_error_invalidates_unread_responses(family):
 def test_complete_domain_error_preserves_next_request(family):
     node, sock = make_node(b"TYPE_MISMATCH\r\n" + NEXT_RESPONSES)
     first = collection_operation(node, family)
-    present, missing = node.get("present"), node.get("missing")
+    present, missing = node.commands.kv.get("present"), node.commands.kv.get("missing")
     send_and_receive(node, [first, present, missing])
     with pytest.raises(CollectionType):
         first.get_result(timeout=0.1)
@@ -138,12 +139,12 @@ def test_complete_domain_error_preserves_next_request(family):
 def test_complete_bkey_mismatch_preserves_next_request(method):
     node, sock = make_node(b"BKEY_MISMATCH\r\n" + NEXT_RESPONSES)
     if method == "bop_count":
-        first = node.bop_count("collection", (0, 10), None)
+        first = node.commands.btree.count("collection", (0, 10), None)
     elif method == "bop_smget":
-        first = node.bop_smget(["collection"], (0, 10))
+        first = node.commands.btree.smget(["collection"], (0, 10))
     else:
-        first = node.bop_get("collection", (0, 10))
-    present, missing = node.get("present"), node.get("missing")
+        first = node.commands.btree.get("collection", (0, 10))
+    present, missing = node.commands.kv.get("present"), node.commands.kv.get("missing")
     send_and_receive(node, [first, present, missing])
     with pytest.raises(CollectionType, match="bkey type mismatch"):
         first.get_result(timeout=0.1)
@@ -154,7 +155,11 @@ def test_complete_bkey_mismatch_preserves_next_request(method):
 
 def test_complete_kv_codec_error_preserves_next_request():
     node, sock = make_node(b"VALUE bad 0 1\r\n\xff\r\nEND\r\n" + NEXT_RESPONSES)
-    first, present, missing = node.get("bad"), node.get("present"), node.get("missing")
+    first, present, missing = (
+        node.commands.kv.get("bad"),
+        node.commands.kv.get("present"),
+        node.commands.kv.get("missing"),
+    )
     send_and_receive(node, [first, present, missing])
     with pytest.raises(UnicodeDecodeError):
         first.get_result(timeout=0.1)
@@ -170,9 +175,11 @@ def test_previous_complete_response_does_not_make_custom_parser_failure_safe():
         node.handle.readline()
         raise ValueError("custom parser failed before the payload")
 
-    first = node.get("missing")
-    failed = node.add_op("lop get", b"lop get collection 0", incomplete_callback)
-    pending = node.get("present")
+    first = node.commands.kv.get("missing")
+    failed = node.submit(
+        CommandRequest("lop get", b"lop get collection 0", incomplete_callback)
+    )
+    pending = node.commands.kv.get("present")
     send_and_receive(node, [first, failed, pending])
     assert first.get_result(timeout=0.1) is None
     with pytest.raises(ValueError, match="custom parser"):
@@ -203,7 +210,7 @@ def test_previous_complete_response_does_not_make_custom_parser_failure_safe():
 )
 def test_malformed_collection_response_invalidates_pending_requests(family, wire):
     node, sock = make_node(wire + NEXT_RESPONSES)
-    first, pending = collection_operation(node, family), node.get("present")
+    first, pending = collection_operation(node, family), node.commands.kv.get("present")
     send_and_receive(node, [first, pending])
     with pytest.raises(ArcusProtocolException):
         first.get_result(timeout=0.1)
@@ -215,7 +222,7 @@ def test_malformed_collection_response_invalidates_pending_requests(family, wire
 @pytest.mark.parametrize("family", FAMILIES)
 def test_collection_eof_invalidates_pending_requests(family):
     node, sock = make_node(collection_wire(family, 0, b"abc")[:-8])
-    first, pending = collection_operation(node, family), node.get("present")
+    first, pending = collection_operation(node, family), node.commands.kv.get("present")
     send_and_receive(node, [first, pending])
     with pytest.raises(ArcusNodeConnectionException):
         first.get_result(timeout=0.1)
@@ -228,9 +235,9 @@ def test_set_existence_pipeline_consumes_all_results_and_preserves_next_request(
     node, sock = make_node(
         b"RESPONSE 2\r\nEXIST\r\nNOT_EXIST\r\nEND\r\n" + NEXT_RESPONSES
     )
-    piped = node.sop_exist("set", "first", pipe=True)
-    final = node.sop_exist("set", "second")
-    present, missing = node.get("present"), node.get("missing")
+    piped = node.commands.set.exist("set", "first", pipe=True)
+    final = node.commands.set.exist("set", "second")
+    present, missing = node.commands.kv.get("present"), node.commands.kv.get("missing")
     send_and_receive(node, [piped, final, present, missing])
     assert piped.get_result(timeout=0.1) is True
     assert final.get_result(timeout=0.1) == ["EXIST", "NOT_EXIST"]
@@ -252,7 +259,10 @@ def test_set_existence_pipeline_consumes_all_results_and_preserves_next_request(
 )
 def test_pipeline_failure_invalidates_remaining_operations(wire):
     node, sock = make_node(wire + NEXT_RESPONSES)
-    first, pending = node.lop_insert("list", 0, "x"), node.get("present")
+    first, pending = (
+        node.commands.list.insert("list", 0, "x"),
+        node.commands.kv.get("present"),
+    )
     send_and_receive(node, [first, pending])
     with pytest.raises(ArcusProtocolException):
         first.get_result(timeout=0.1)

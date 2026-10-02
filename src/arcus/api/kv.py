@@ -24,36 +24,46 @@ class KeyValueAPI:
         self._executor = executor
 
     def set(self, key, val, exptime=0):
-        return self._executor.execute(key, lambda node: node.set(key, val, exptime))
+        return self._executor.execute(
+            key, lambda node: node.commands.kv.set(key, val, exptime)
+        )
 
     def get(self, key):
-        return self._executor.execute(key, lambda node: node.get(key))
+        return self._executor.execute(key, lambda node: node.commands.kv.get(key))
 
     def gets(self, key):
-        return self._executor.execute(key, lambda node: node.gets(key))
+        return self._executor.execute(key, lambda node: node.commands.kv.gets(key))
 
     def incr(self, key, val=1):
-        return self._executor.execute(key, lambda node: node.incr(key, val))
+        return self._executor.execute(key, lambda node: node.commands.kv.incr(key, val))
 
     def decr(self, key, val=1):
-        return self._executor.execute(key, lambda node: node.decr(key, val))
+        return self._executor.execute(key, lambda node: node.commands.kv.decr(key, val))
 
     def delete(self, key):
-        return self._executor.execute(key, lambda node: node.delete(key))
+        return self._executor.execute(key, lambda node: node.commands.kv.delete(key))
 
     def add(self, key, val, exptime=0):
-        return self._executor.execute(key, lambda node: node.add(key, val, exptime))
+        return self._executor.execute(
+            key, lambda node: node.commands.kv.add(key, val, exptime)
+        )
 
     def append(self, key, val, exptime=0):
-        return self._executor.execute(key, lambda node: node.append(key, val, exptime))
+        return self._executor.execute(
+            key, lambda node: node.commands.kv.append(key, val, exptime)
+        )
 
     def prepend(self, key, val, exptime=0):
-        return self._executor.execute(key, lambda node: node.prepend(key, val, exptime))
+        return self._executor.execute(
+            key, lambda node: node.commands.kv.prepend(key, val, exptime)
+        )
 
     def replace(self, key, val, exptime=0):
-        return self._executor.execute(key, lambda node: node.replace(key, val, exptime))
+        return self._executor.execute(
+            key, lambda node: node.commands.kv.replace(key, val, exptime)
+        )
 
     def cas(self, key, val, cas_id, exptime=0):
         return self._executor.execute(
-            key, lambda node: node.cas(key, val, cas_id, exptime)
+            key, lambda node: node.commands.kv.cas(key, val, cas_id, exptime)
         )

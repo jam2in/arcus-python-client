@@ -8,7 +8,8 @@ from unittest.mock import Mock, patch
 import pytest
 
 from arcus import ArcusNodeConnectionException, ArcusTranscoder
-from arcus_mc_node import ArcusMCNode, ArcusMCNodeAllocator, ArcusMCPoll
+from arcus.protocol import ArcusMCNode, ArcusMCNodeAllocator, ArcusMCPoll
+from arcus.protocol.request import CommandRequest
 
 
 def make_node(sock=None):
@@ -27,8 +28,8 @@ def make_node(sock=None):
 def test_partial_send_failure_invalidates_all_pending_and_never_retries():
     node, sock, allocator = make_node()
     sock.sendall.side_effect = socket.timeout("partial write")
-    first = node.get("first")
-    second = node.get("second")
+    first = node.commands.kv.get("first")
+    second = node.commands.kv.get("second")
     node.process_operation(first)
     node.process_operation(second)
     with pytest.raises(socket.timeout):
@@ -44,7 +45,7 @@ def test_partial_send_failure_invalidates_all_pending_and_never_retries():
 
 def test_disconnect_between_dequeue_and_send_cannot_send_stale_operation():
     node, sock, allocator = make_node()
-    operation = node.get("stale")
+    operation = node.commands.kv.get("stale")
     dequeued = allocator.worker.q.get_nowait()
     started = threading.Event()
 
@@ -66,7 +67,9 @@ def test_disconnect_between_dequeue_and_send_cannot_send_stale_operation():
 def test_noreply_reports_send_failure_instead_of_premature_success():
     node, sock, _ = make_node()
     sock.sendall.side_effect = BrokenPipeError("closed")
-    operation = node.add_op("command", b"command noreply", None, noreply=True)
+    operation = node.submit(
+        CommandRequest("command", b"command noreply", None, noreply=True)
+    )
     assert not operation.has_result()
     node.process_operation(operation)
     with pytest.raises(BrokenPipeError):
@@ -75,7 +78,9 @@ def test_noreply_reports_send_failure_instead_of_premature_success():
 
 def test_noreply_completes_after_write_without_waiting_for_response():
     node, sock, _ = make_node()
-    operation = node.add_op("command", b"command noreply", None, noreply=True)
+    operation = node.submit(
+        CommandRequest("command", b"command noreply", None, noreply=True)
+    )
     node.process_operation(operation)
     assert operation.get_result(timeout=0.1) is True
     assert not node._pending
@@ -85,7 +90,7 @@ def test_noreply_completes_after_write_without_waiting_for_response():
 
 def test_queue_deadline_expires_before_a_write():
     node, sock, _ = make_node()
-    operation = node.get("expired")
+    operation = node.commands.kv.get("expired")
     operation.deadline = time.monotonic() - 1
     node.process_operation(operation)
     with pytest.raises(socket.timeout):
@@ -96,8 +101,8 @@ def test_queue_deadline_expires_before_a_write():
 
 def test_silent_deadline_invalidates_all_response_slots():
     node, sock, _ = make_node()
-    first = node.get("first")
-    second = node.get("second")
+    first = node.commands.kv.get("first")
+    second = node.commands.kv.get("second")
     node.process_operation(first)
     first.deadline = time.monotonic() - 1
     node.expire_operations()
@@ -111,9 +116,9 @@ def test_silent_deadline_invalidates_all_response_slots():
 
 def test_retired_node_rejects_new_requests_and_releases_tracking():
     node, sock, allocator = make_node()
-    pending = node.get("old")
+    pending = node.commands.kv.get("old")
     node.close()
-    fresh = node.get("new")
+    fresh = node.commands.kv.get("new")
     for operation in (pending, fresh):
         with pytest.raises(ArcusNodeConnectionException):
             operation.get_result(timeout=0.1)
@@ -123,11 +128,11 @@ def test_retired_node_rejects_new_requests_and_releases_tracking():
 
 def test_reconnect_unregisters_old_descriptor_and_preserves_fresh_result():
     node, original, allocator = make_node()
-    old = node.get("old")
+    old = node.commands.kv.get("old")
     node.disconnect()
     replacement = Mock(spec=socket.socket)
     replacement.recv.return_value = b"VALUE fresh 0 2\r\nok\r\nEND\r\n"
-    fresh = node.get("fresh")
+    fresh = node.commands.kv.get("fresh")
     with patch("arcus.protocol.connection.socket.socket", return_value=replacement):
         node.process_operation(old)
         node.process_operation(fresh)
@@ -222,8 +227,8 @@ def test_poll_registration_replaces_the_previous_descriptor_for_a_node():
 @pytest.mark.parametrize("failure_path", ["send", "receive", "expire"])
 def test_transport_is_closed_before_publishing_fatal_operation_results(failure_path):
     node, sock, allocator = make_node()
-    first = node.get("first")
-    second = node.get("second")
+    first = node.commands.kv.get("first")
+    second = node.commands.kv.get("second")
     published = []
 
     def check_publication(operation):

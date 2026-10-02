@@ -14,7 +14,23 @@ from arcus import (
     ArcusSet,
 )
 from arcus.api import BTreeAPI, KeyValueAPI, ListAPI, RequestExecutor, SetAPI
-from arcus_mc_node import ArcusMCNode
+
+
+def api_for(client, method):
+    if "_" in method:
+        namespace, method = method.split("_", 1)
+    else:
+        namespace = "kv"
+    return getattr(getattr(client, namespace), method)
+
+
+def command_for(node, method):
+    if "_" in method:
+        namespace, method = method.split("_", 1)
+        family = {"lop": "list", "sop": "set", "bop": "btree"}[namespace]
+    else:
+        family = "kv"
+    return getattr(getattr(node.commands, family), method)
 
 
 class KeyLocator:
@@ -70,15 +86,15 @@ def completed(result):
 def test_each_single_key_api_routes_and_preserves_arguments_and_operation(
     method, arguments
 ):
-    first, second = Mock(spec=ArcusMCNode), Mock(spec=ArcusMCNode)
+    first, second = Mock(), Mock()
     locator = KeyLocator({"first": first, "second": second})
     client = Arcus(locator)
 
     for key, node in (("first", first), ("second", second)):
         pending = ArcusOperation(node, b"request", None)
-        command = getattr(node, method)
+        command = command_for(node, method)
         command.return_value = pending
-        returned = getattr(client, method)(key, *arguments)
+        returned = api_for(client, method)(key, *arguments)
         command.assert_called_once_with(key, *arguments)
         assert returned is pending
         assert not returned.has_result()
@@ -99,12 +115,12 @@ def test_each_single_key_api_routes_and_preserves_arguments_and_operation(
 def test_family_apis_can_be_used_with_only_an_executor(
     family, method, arguments, node_method, expected
 ):
-    node = Mock(spec=ArcusMCNode)
+    node = Mock()
     api = family(RequestExecutor(KeyLocator({"key": node})))
 
     returned = getattr(api, method)(*arguments)
 
-    command = getattr(node, node_method)
+    command = command_for(node, node_method)
     command.assert_called_once_with(*expected)
     assert returned is command.return_value
 
@@ -116,10 +132,10 @@ def test_replacing_locator_updates_all_family_routes_and_lifecycle():
 
     assert client.locator is replacement
     assert client.connect("zk:2181", "service") is None
-    client.get("kv")
-    client.lop_get("list", (0, -1))
-    client.sop_get("set")
-    client.bop_count("btree", (0, 10))
+    client.kv.get("kv")
+    client.lop.get("list", (0, -1))
+    client.sop.get("set")
+    client.bop.count("btree", (0, 10))
     assert client.disconnect() is None
 
     original.assert_not_called()
@@ -135,39 +151,48 @@ def test_replacing_locator_updates_all_family_routes_and_lifecycle():
 
 
 def test_mget_groups_keys_per_node_and_preserves_merge_and_miss_semantics():
-    first, second = Mock(spec=ArcusMCNode), Mock(spec=ArcusMCNode)
+    first, second = Mock(), Mock()
     locator = KeyLocator({"a": first, "b": second, "c": first, "missing": second})
-    first.bop_mget.return_value = completed(({"a": {1: "a"}, "c": {3: "c"}}, []))
-    second.bop_mget.return_value = completed(({"b": {2: "b"}}, ["missing"]))
+    first.commands.btree.mget.return_value = completed(
+        ({"a": {1: "a"}, "c": {3: "c"}}, [])
+    )
+    second.commands.btree.mget.return_value = completed(({"b": {2: "b"}}, ["missing"]))
 
-    operations = Arcus(locator).bop_mget(
+    operations = Arcus(locator).bop.mget(
         ["a", "b", "c", "missing", "a"], (0, 10), "filter", 2, 3
     )
 
-    first.bop_mget.assert_called_once_with(["a", "c", "a"], (0, 10), "filter", 2, 3)
-    second.bop_mget.assert_called_once_with(["b", "missing"], (0, 10), "filter", 2, 3)
+    first.commands.btree.mget.assert_called_once_with(
+        ["a", "c", "a"], (0, 10), "filter", 2, 3
+    )
+    second.commands.btree.mget.assert_called_once_with(
+        ["b", "missing"], (0, 10), "filter", 2, 3
+    )
     assert isinstance(operations, ArcusOperationList)
-    assert operations.ops == [first.bop_mget.return_value, second.bop_mget.return_value]
+    assert operations.ops == [
+        first.commands.btree.mget.return_value,
+        second.commands.btree.mget.return_value,
+    ]
     assert operations.get_result() == {"a": {1: "a"}, "b": {2: "b"}, "c": {3: "c"}}
     assert operations.get_missed_key() == ["missing"]
     assert locator.lookups == ["a", "b", "c", "missing", "a"]
 
 
 def test_smget_merges_completed_results_without_waiting_during_dispatch():
-    first, second = Mock(spec=ArcusMCNode), Mock(spec=ArcusMCNode)
+    first, second = Mock(), Mock()
     first_result = [(1, "a"), (4, "a")]
     second_result = [(2, "b"), (3, "b")]
-    first.bop_smget.return_value = ArcusOperation(first, b"smget", None)
-    second.bop_smget.return_value = ArcusOperation(second, b"smget", None)
+    first.commands.btree.smget.return_value = ArcusOperation(first, b"smget", None)
+    second.commands.btree.smget.return_value = ArcusOperation(second, b"smget", None)
     client = Arcus(KeyLocator({"a": first, "b": second}))
 
-    operations = client.bop_smget(["a", "b"], (0, 10))
+    operations = client.bop.smget(["a", "b"], (0, 10))
 
-    first.bop_smget.assert_called_once_with(["a"], (0, 10), None, 0, 2000)
-    second.bop_smget.assert_called_once_with(["b"], (0, 10), None, 0, 2000)
+    first.commands.btree.smget.assert_called_once_with(["a"], (0, 10), None, 0, 2000)
+    second.commands.btree.smget.assert_called_once_with(["b"], (0, 10), None, 0, 2000)
     assert not operations.has_result()
-    first.bop_smget.return_value.set_result((first_result, ["z"]))
-    second.bop_smget.return_value.set_result((second_result, ["x"]))
+    first.commands.btree.smget.return_value.set_result((first_result, ["z"]))
+    second.commands.btree.smget.return_value.set_result((second_result, ["x"]))
     assert operations.get_result() == [(1, "a"), (2, "b"), (3, "b"), (4, "a")]
     assert operations.get_missed_key() == ["x", "z"]
     assert first_result == [(1, "a"), (4, "a")]
@@ -176,10 +201,10 @@ def test_smget_merges_completed_results_without_waiting_during_dispatch():
 
 @pytest.mark.parametrize("method", ["bop_mget", "bop_smget"])
 def test_multi_node_errors_propagate_as_the_original_operation_error(method):
-    node = Mock(spec=ArcusMCNode)
+    node = Mock()
     failure = ArcusNodeConnectionException("disconnected")
-    getattr(node, method).return_value = completed(failure)
-    operations = getattr(Arcus(KeyLocator({"key": node})), method)(["key"], (0, 3))
+    command_for(node, method).return_value = completed(failure)
+    operations = api_for(Arcus(KeyLocator({"key": node})), method)(["key"], (0, 3))
 
     with pytest.raises(ArcusNodeConnectionException) as raised:
         operations.get_result(timeout=0.1)
@@ -188,11 +213,11 @@ def test_multi_node_errors_propagate_as_the_original_operation_error(method):
 
 @pytest.mark.parametrize("method", ["bop_mget", "bop_smget"])
 def test_multi_node_routing_resolves_all_keys_before_submitting_any_request(method):
-    node = Mock(spec=ArcusMCNode)
+    node = Mock()
     client = Arcus(KeyLocator({"known": node}))
 
     with pytest.raises(KeyError):
-        getattr(client, method)(["known", "unknown"], (0, 3))
+        api_for(client, method)(["known", "unknown"], (0, 3))
 
     assert node.mock_calls == []
 
@@ -200,7 +225,7 @@ def test_multi_node_routing_resolves_all_keys_before_submitting_any_request(meth
 @pytest.mark.parametrize(("method", "result"), [("bop_mget", {}), ("bop_smget", [])])
 def test_empty_multi_key_request_preserves_empty_result(method, result):
     locator = KeyLocator({})
-    operations = getattr(Arcus(locator), method)([], (0, 3))
+    operations = api_for(Arcus(locator), method)([], (0, 3))
     assert operations.get_result(timeout=0.1) == result
     assert operations.get_missed_key() == []
     assert locator.lookups == []
@@ -212,13 +237,13 @@ def test_single_node_routing_and_submission_errors_remain_synchronous():
     locator.get_node.side_effect = failure
     client = Arcus(locator)
     with pytest.raises(ArcusNodeConnectionException) as raised:
-        client.get("key")
+        client.kv.get("key")
     assert raised.value is failure
 
     locator.get_node.side_effect = None
-    locator.get_node.return_value.get.side_effect = failure
+    locator.get_node.return_value.commands.kv.get.side_effect = failure
     with pytest.raises(ArcusNodeConnectionException) as raised:
-        client.get("key")
+        client.kv.get("key")
     assert raised.value is failure
 
 
@@ -226,22 +251,22 @@ def test_collection_wrappers_keep_the_client_and_creation_arguments():
     locator = Mock()
     client = Arcus(locator)
 
-    items = client.list_alloc("list", 3, exptime=60)
-    members = client.set_alloc("set", 4, exptime=90)
+    items = client.lop.alloc("list", 3, exptime=60)
+    members = client.sop.alloc("set", 4, exptime=90)
 
     assert isinstance(items, ArcusList)
     assert isinstance(members, ArcusSet)
     assert items.arcus is members.arcus is client
     assert items.key == "list"
     assert members.key == "set"
-    locator.get_node.return_value.lop_create.assert_called_once_with(
+    locator.get_node.return_value.commands.list.create.assert_called_once_with(
         "list", 3, 60, False, None
     )
-    locator.get_node.return_value.sop_create.assert_called_once_with(
+    locator.get_node.return_value.commands.set.create.assert_called_once_with(
         "set", 4, 90, False, None
     )
-    locator.get_node.return_value.lop_get.assert_not_called()
-    locator.get_node.return_value.sop_get.assert_not_called()
+    locator.get_node.return_value.commands.list.get.assert_not_called()
+    locator.get_node.return_value.commands.set.get.assert_not_called()
 
 
 # Snapshot of the published facade: named parameters and defaults are compatibility.

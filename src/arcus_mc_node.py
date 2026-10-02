@@ -1,5 +1,7 @@
 """Compatibility imports for applications using the former flat module."""
 
+import warnings
+
 from arcus.protocol import (
     ArcusMCNodeAllocator,
     Connection,
@@ -8,6 +10,11 @@ from arcus.protocol import (
     ArcusMCPoll,
     ArcusMCWorker,
 )
+
+__deprecated__ = (
+    "arcus_mc_node is deprecated; import these names from arcus.protocol instead."
+)
+warnings.warn(__deprecated__, DeprecationWarning, stacklevel=2)
 
 __all__ = [
     "ArcusMCNodeAllocator",

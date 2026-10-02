@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from arcus import ArcusProtocolException, ArcusTranscoder
-from arcus_mc_node import ArcusMCNode
+from arcus.protocol import ArcusMCNode
 
 
 @pytest.mark.parametrize("arguments", [None, "items"])
@@ -17,8 +17,8 @@ def test_stats_returns_all_lines_and_leaves_the_next_response(arguments):
     allocator = SimpleNamespace(shutdown=False, worker=Mock(q=queue.Queue()))
     with patch("arcus.protocol.connection.socket.socket", return_value=sock):
         node = ArcusMCNode("127.0.0.1:11211", "test", ArcusTranscoder(), allocator)
-    stats = node.get_stats(arguments)
-    stored = node.set("key", "value")
+    stats = node.commands.admin.get_stats(arguments)
+    stored = node.commands.kv.set("key", "value")
     node.process_operation(stats)
     node.process_operation(stored)
     node.do_op()
@@ -35,7 +35,7 @@ def test_malformed_stats_response_closes_the_connection():
     allocator = SimpleNamespace(shutdown=False, worker=Mock(q=queue.Queue()))
     with patch("arcus.protocol.connection.socket.socket", return_value=sock):
         node = ArcusMCNode("127.0.0.1:11211", "test", ArcusTranscoder(), allocator)
-    stats = node.get_stats()
+    stats = node.commands.admin.get_stats()
     node.process_operation(stats)
     node.do_op()
     with pytest.raises(ArcusProtocolException):

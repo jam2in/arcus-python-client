@@ -27,7 +27,10 @@ class BTreeAPI:
 
     def create(self, key, flags, exptime=0, noreply=False, attr_map=None):
         return self._executor.execute(
-            key, lambda node: node.bop_create(key, flags, exptime, noreply, attr_map)
+            key,
+            lambda node: node.commands.btree.create(
+                key, flags, exptime, noreply, attr_map
+            ),
         )
 
     def insert(
@@ -35,7 +38,7 @@ class BTreeAPI:
     ):
         return self._executor.execute(
             key,
-            lambda node: node.bop_insert(
+            lambda node: node.commands.btree.insert(
                 key, bkey, value, eflag, noreply, pipe, attr_map
             ),
         )
@@ -45,7 +48,7 @@ class BTreeAPI:
     ):
         return self._executor.execute(
             key,
-            lambda node: node.bop_upsert(
+            lambda node: node.commands.btree.upsert(
                 key, bkey, value, eflag, noreply, pipe, attr_map
             ),
         )
@@ -55,14 +58,14 @@ class BTreeAPI:
     ):
         return self._executor.execute(
             key,
-            lambda node: node.bop_update(
+            lambda node: node.commands.btree.update(
                 key, bkey, value, eflag, noreply, pipe, attr_map
             ),
         )
 
     def get(self, key, range, filter=None, delete=False, drop=False):
         return self._executor.execute(
-            key, lambda node: node.bop_get(key, range, filter, delete, drop)
+            key, lambda node: node.commands.btree.get(key, range, filter, delete, drop)
         )
 
     def delete(
@@ -70,30 +73,32 @@ class BTreeAPI:
     ):
         return self._executor.execute(
             key,
-            lambda node: node.bop_delete(
+            lambda node: node.commands.btree.delete(
                 key, range, filter, count, drop, noreply, pipe
             ),
         )
 
     def count(self, key, range, filter=None):
         return self._executor.execute(
-            key, lambda node: node.bop_count(key, range, filter)
+            key, lambda node: node.commands.btree.count(key, range, filter)
         )
 
     def incr(self, key, bkey, value, noreply=False, pipe=False):
         return self._executor.execute(
-            key, lambda node: node.bop_incr(key, bkey, value, noreply, pipe)
+            key, lambda node: node.commands.btree.incr(key, bkey, value, noreply, pipe)
         )
 
     def decr(self, key, bkey, value, noreply=False, pipe=False):
         return self._executor.execute(
-            key, lambda node: node.bop_decr(key, bkey, value, noreply, pipe)
+            key, lambda node: node.commands.btree.decr(key, bkey, value, noreply, pipe)
         )
 
     def mget(self, key_list, range, filter=None, offset=None, count=50):
         operations = ArcusOperationList("bop mget")
         for node, keys in self._executor.group_by_node(key_list).items():
-            operations.add_op(node.bop_mget(keys, range, filter, offset, count))
+            operations.add_op(
+                node.commands.btree.mget(keys, range, filter, offset, count)
+            )
         return operations
 
     def smget(self, key_list, range, filter=None, offset=None, count=2000):
@@ -109,6 +114,6 @@ class BTreeAPI:
         node_count = merge_offset + count if multi_node else count
         for node, keys in groups.items():
             operations.add_op(
-                node.bop_smget(keys, range, filter, node_offset, node_count)
+                node.commands.btree.smget(keys, range, filter, node_offset, node_count)
             )
         return operations

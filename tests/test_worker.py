@@ -10,7 +10,7 @@ from arcus import (
     ArcusProtocolException,
     ArcusTranscoder,
 )
-from arcus_mc_node import ArcusMCNode, ArcusMCWorker
+from arcus.protocol import ArcusMCNode, ArcusMCWorker
 
 
 def make_worker():
@@ -65,15 +65,15 @@ def test_invalidated_queued_request_cannot_supply_a_later_requests_result():
         node = ArcusMCNode(
             "127.0.0.1:11211", "test", ArcusTranscoder(), worker.node_allocator
         )
-        first = node.get("first")
-        stale = node.get("second")
+        first = node.commands.kv.get("first")
+        stale = node.commands.kv.get("second")
         node.process_request(worker.q.get_nowait().request)
         node.do_op()
         assert isinstance(first.result, ArcusProtocolException)
         assert isinstance(stale.result, ArcusNodeConnectionException)
         assert stale.invalid
 
-        fresh = node.get("third")
+        fresh = node.commands.kv.get("third")
         process_request = node.process_request
 
         def process_and_read(request):

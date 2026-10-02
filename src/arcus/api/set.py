@@ -18,32 +18,48 @@
 
 """Set operations and their routing requirements."""
 
+from ..collections import ArcusSet
+
 
 class SetAPI:
-    def __init__(self, executor):
+    def __init__(self, executor, client=None):
         self._executor = executor
+        self._client = client
 
     def create(self, key, flags, exptime=0, noreply=False, attr_map=None):
         return self._executor.execute(
-            key, lambda node: node.sop_create(key, flags, exptime, noreply, attr_map)
+            key,
+            lambda node: node.commands.set.create(
+                key, flags, exptime, noreply, attr_map
+            ),
         )
 
     def insert(self, key, value, noreply=False, pipe=False, attr_map=None):
         return self._executor.execute(
-            key, lambda node: node.sop_insert(key, value, noreply, pipe, attr_map)
+            key,
+            lambda node: node.commands.set.insert(key, value, noreply, pipe, attr_map),
         )
 
     def get(self, key, count=0, delete=False, drop=False):
         return self._executor.execute(
-            key, lambda node: node.sop_get(key, count, delete, drop)
+            key, lambda node: node.commands.set.get(key, count, delete, drop)
         )
 
     def delete(self, key, value, drop=False, noreply=False, pipe=False):
         return self._executor.execute(
-            key, lambda node: node.sop_delete(key, value, drop, noreply, pipe)
+            key, lambda node: node.commands.set.delete(key, value, drop, noreply, pipe)
         )
 
     def exist(self, key, value, pipe=False):
         return self._executor.execute(
-            key, lambda node: node.sop_exist(key, value, pipe)
+            key, lambda node: node.commands.set.exist(key, value, pipe)
         )
+
+    def alloc(self, key, flags, exptime=0, cache_time=0):
+        """Create a collection and return its Python wrapper."""
+        self.create(key, flags, exptime)
+        return self.wrap(key, cache_time)
+
+    def wrap(self, key, cache_time=0):
+        """Return a Python wrapper for an existing collection key."""
+        return ArcusSet(self._client, key, cache_time, _api=self)

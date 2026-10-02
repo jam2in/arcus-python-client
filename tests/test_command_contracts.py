@@ -2,6 +2,7 @@
 
 import inspect
 import queue
+import warnings
 from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -10,9 +11,9 @@ import pytest
 
 from arcus import ArcusOperation, ArcusTranscoder, CollectionHexFormat, EflagFilter
 from arcus.protocol.commands import CommandHandlers
+from arcus.protocol.node import ArcusMCNode
 from arcus.protocol.request import CommandRequest
 from arcus.protocol.responses import ResponseHandlers
-from arcus_mc_node import ArcusMCNode
 
 
 class RecordingSubmitter:
@@ -385,7 +386,16 @@ def test_wire_bytes_response_contract_and_operation_identity(entry, entrypoint):
         }[family]
         command = getattr(node, prefix + method)
 
-    returned = command(*args, **kwargs)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", DeprecationWarning)
+        returned = command(*args, **kwargs)
+    if entrypoint == "legacy_node":
+        assert len(caught) == 1
+        assert caught[0].category is DeprecationWarning
+        assert "node.commands." + family + "." + method in str(caught[0].message)
+        assert caught[0].filename == __file__
+    else:
+        assert caught == []
 
     assert returned is submitter.operation
     assert not returned.has_result()
