@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import pytest
 from kazoo.handlers.threading import SequentialThreadingHandler
 
+import arcus.discovery as discovery
 import arcus.routing as routing
 from arcus import ArcusLocator, ArcusNodeConnectionException, ArcusProtocolException
 
@@ -89,9 +90,12 @@ def test_disconnect_without_connect_stops_allocator(locator, allocator):
         locator.get_node("key")
 
 
-def test_zero_node_disconnect_stops_and_closes_zookeeper(locator, allocator):
-    zk = Mock()
-    locator.zk = zk
+def test_zero_node_disconnect_stops_and_closes_zookeeper(
+    locator, allocator, monkeypatch
+):
+    zk = configured_zk([])
+    monkeypatch.setattr(discovery, "KazooClient", Mock(return_value=zk))
+    locator.connect("zookeeper:2181", "service")
     locator.disconnect()
     zk.stop.assert_called_once_with()
     zk.close.assert_called_once_with()
@@ -102,7 +106,7 @@ def test_zero_node_disconnect_stops_and_closes_zookeeper(locator, allocator):
 def test_failed_connect_closes_zookeeper_and_allocator(locator, allocator, monkeypatch):
     zk = Mock()
     zk.start.side_effect = RuntimeError("unavailable ZooKeeper")
-    monkeypatch.setattr(routing, "KazooClient", Mock(return_value=zk))
+    monkeypatch.setattr(discovery, "KazooClient", Mock(return_value=zk))
     with pytest.raises(RuntimeError, match="unavailable ZooKeeper"):
         locator.connect("zookeeper:2181", "service")
     zk.stop.assert_called_once_with()
@@ -125,7 +129,9 @@ def test_reconnect_restarts_allocator_and_ignores_old_watch(
 ):
     first_zk = configured_zk(["cache1:11211-a"])
     second_zk = configured_zk(["cache2:11211-b"])
-    monkeypatch.setattr(routing, "KazooClient", Mock(side_effect=[first_zk, second_zk]))
+    monkeypatch.setattr(
+        discovery, "KazooClient", Mock(side_effect=[first_zk, second_zk])
+    )
     locator.connect("zookeeper:2181", "service")
     first_watch = first_zk.get_children_async.call_args.kwargs["watch"]
     locator.disconnect()
@@ -139,7 +145,7 @@ def test_reconnect_restarts_allocator_and_ignores_old_watch(
 
 def test_watch_after_disconnect_does_not_allocate(locator, allocator, monkeypatch):
     zk = configured_zk(["cache1:11211-a"])
-    monkeypatch.setattr(routing, "KazooClient", Mock(return_value=zk))
+    monkeypatch.setattr(discovery, "KazooClient", Mock(return_value=zk))
     locator.connect("zookeeper:2181", "service")
     watch = zk.get_children_async.call_args.kwargs["watch"]
     locator.disconnect()
@@ -155,12 +161,14 @@ def test_stopped_locator_does_not_accept_direct_rehash(locator, allocator):
     allocator.alloc.assert_not_called()
 
 
-def test_disconnect_cleans_all_resources_if_node_close_fails(locator, allocator):
-    locator.hash_nodes(["cache1:11211-a", "cache2:11211-b"])
+def test_disconnect_cleans_all_resources_if_node_close_fails(
+    locator, allocator, monkeypatch
+):
+    zk = configured_zk(["cache1:11211-a", "cache2:11211-b"])
+    monkeypatch.setattr(discovery, "KazooClient", Mock(return_value=zk))
+    locator.connect("zookeeper:2181", "service")
     first, second = locator.addr_node_map.values()
     first.close.side_effect = RuntimeError("close failed")
-    zk = Mock()
-    locator.zk = zk
     with pytest.raises(RuntimeError, match="close failed"):
         locator.disconnect()
     second.close.assert_called_once_with()
@@ -175,7 +183,7 @@ def test_watch_racing_disconnect_cannot_restore_closed_nodes(
 ):
     zk = configured_zk(["cache1:11211-a"])
     pending = Mock()
-    monkeypatch.setattr(routing, "KazooClient", Mock(return_value=zk))
+    monkeypatch.setattr(discovery, "KazooClient", Mock(return_value=zk))
     locator.connect("zookeeper:2181", "service")
     watch = zk.get_children_async.call_args.kwargs["watch"]
     zk.get_children_async.return_value = pending
@@ -189,10 +197,13 @@ def test_watch_racing_disconnect_cannot_restore_closed_nodes(
     allocator.close.assert_called_once_with()
 
 
-def test_zookeeper_stop_failure_still_closes_remaining_resources(locator, allocator):
-    zk = Mock()
+def test_zookeeper_stop_failure_still_closes_remaining_resources(
+    locator, allocator, monkeypatch
+):
+    zk = configured_zk([])
+    monkeypatch.setattr(discovery, "KazooClient", Mock(return_value=zk))
+    locator.connect("zookeeper:2181", "service")
     zk.stop.side_effect = RuntimeError("stop failed")
-    locator.zk = zk
     with pytest.raises(RuntimeError, match="stop failed"):
         locator.disconnect()
     zk.close.assert_called_once_with()
@@ -201,7 +212,7 @@ def test_zookeeper_stop_failure_still_closes_remaining_resources(locator, alloca
 
 def test_session_notice_does_not_issue_a_blocking_zookeeper_read(locator, monkeypatch):
     zk = configured_zk(["cache1:11211-a"])
-    monkeypatch.setattr(routing, "KazooClient", Mock(return_value=zk))
+    monkeypatch.setattr(discovery, "KazooClient", Mock(return_value=zk))
     locator.connect("zookeeper:2181", "service")
     watch = zk.get_children_async.call_args.kwargs["watch"]
     zk.get_children.side_effect = AssertionError("blocking read during suspension")
@@ -211,14 +222,14 @@ def test_session_notice_does_not_issue_a_blocking_zookeeper_read(locator, monkey
 
 def test_reconnection_listener_is_registered(locator, monkeypatch):
     zk = configured_zk(["cache1:11211-a"])
-    monkeypatch.setattr(routing, "KazooClient", Mock(return_value=zk))
+    monkeypatch.setattr(discovery, "KazooClient", Mock(return_value=zk))
     locator.connect("zookeeper:2181", "service")
     zk.add_listener.assert_called_once()
 
 
 def test_pending_discovery_keeps_cache_routing_available(locator, monkeypatch):
     zk = configured_zk(["cache1:11211-a"])
-    monkeypatch.setattr(routing, "KazooClient", Mock(return_value=zk))
+    monkeypatch.setattr(discovery, "KazooClient", Mock(return_value=zk))
     locator.connect("zookeeper:2181", "service")
     listener = zk.add_listener.call_args.args[0]
     zk.get_children.side_effect = AssertionError("synchronous read in listener")
@@ -233,7 +244,7 @@ def test_reconnected_snapshot_updates_membership_and_reinstalls_watch(
     locator, monkeypatch
 ):
     zk = configured_zk(["cache1:11211-a"])
-    monkeypatch.setattr(routing, "KazooClient", Mock(return_value=zk))
+    monkeypatch.setattr(discovery, "KazooClient", Mock(return_value=zk))
     locator.connect("zookeeper:2181", "service")
     listener = zk.add_listener.call_args.args[0]
     listener("LOST")
@@ -248,7 +259,7 @@ def test_reconnected_snapshot_updates_membership_and_reinstalls_watch(
 def test_out_of_order_discovery_completion_keeps_newest_snapshot(locator, monkeypatch):
     zk = configured_zk(["cache1:11211-a"])
     first, second = Mock(), Mock()
-    monkeypatch.setattr(routing, "KazooClient", Mock(return_value=zk))
+    monkeypatch.setattr(discovery, "KazooClient", Mock(return_value=zk))
     locator.connect("zookeeper:2181", "service")
     watch = zk.get_children_async.call_args.kwargs["watch"]
     zk.get_children_async.side_effect = [first, second]
@@ -265,7 +276,7 @@ def test_reconnection_during_initial_snapshot_registers_a_new_watch(
     locator, monkeypatch
 ):
     zk = configured_zk(["cache1:11211-a"])
-    monkeypatch.setattr(routing, "KazooClient", Mock(return_value=zk))
+    monkeypatch.setattr(discovery, "KazooClient", Mock(return_value=zk))
 
     def initial_children(*args, **kwargs):
         listener = zk.add_listener.call_args.args[0]
@@ -289,7 +300,7 @@ def test_reconnection_during_initial_snapshot_registers_a_new_watch(
 def test_incomplete_initial_snapshot_times_out_and_releases_disconnect(
     locator, allocator, monkeypatch, stage
 ):
-    monkeypatch.setattr(routing, "ZOOKEEPER_CONNECT_TIMEOUT", 0.05, raising=False)
+    monkeypatch.setattr(discovery, "ZOOKEEPER_CONNECT_TIMEOUT", 0.05, raising=False)
     zk = configured_zk([])
     handler = SequentialThreadingHandler()
     pending = handler.async_result()
@@ -307,7 +318,7 @@ def test_incomplete_initial_snapshot_times_out_and_releases_disconnect(
     else:
         zk.get_children_async.return_value = pending
         zk.get_children.side_effect = lambda *args, **kwargs: pending.get()
-    monkeypatch.setattr(routing, "KazooClient", Mock(return_value=zk))
+    monkeypatch.setattr(discovery, "KazooClient", Mock(return_value=zk))
     errors = []
 
     def connect():
@@ -343,9 +354,9 @@ def test_incomplete_initial_snapshot_times_out_and_releases_disconnect(
 
 def test_initial_connection_and_discovery_share_one_time_budget(locator, monkeypatch):
     zk = configured_zk(["cache1:11211-a"])
-    monkeypatch.setattr(routing, "KazooClient", Mock(return_value=zk))
+    monkeypatch.setattr(discovery, "KazooClient", Mock(return_value=zk))
     clock = Mock(side_effect=[100.0, 100.0, 105.0, 113.0])
-    monkeypatch.setattr(routing, "time", SimpleNamespace(monotonic=clock))
+    monkeypatch.setattr(discovery, "time", SimpleNamespace(monotonic=clock))
     locator.connect("zookeeper:2181", "service")
     zk.start.assert_called_once_with(timeout=15.0)
     zk.get_async.return_value.get.assert_called_once_with(timeout=10.0)
@@ -358,9 +369,9 @@ def test_exhausted_initial_connection_budget_cleans_resources(
     locator, allocator, monkeypatch
 ):
     zk = configured_zk(["cache1:11211-a"])
-    monkeypatch.setattr(routing, "KazooClient", Mock(return_value=zk))
+    monkeypatch.setattr(discovery, "KazooClient", Mock(return_value=zk))
     clock = Mock(side_effect=[100.0, 100.0, 116.0])
-    monkeypatch.setattr(routing, "time", SimpleNamespace(monotonic=clock))
+    monkeypatch.setattr(discovery, "time", SimpleNamespace(monotonic=clock))
     with pytest.raises(TimeoutError, match="ZooKeeper connection setup"):
         locator.connect("zookeeper:2181", "service")
     zk.get_async.return_value.get.assert_not_called()
@@ -369,3 +380,61 @@ def test_exhausted_initial_connection_budget_cleans_resources(
     zk.close.assert_called_once_with()
     allocator.close.assert_called_once_with()
     assert locator.zk is None
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        ("alpha", "cache2:11211"),
+        ("beta", "cache2:11211"),
+        ("gamma", "cache2:11211"),
+        ("한글", "cache1:11211"),
+        ("0", "cache3:11211"),
+        ("999", "cache3:11211"),
+    ],
+)
+def test_standalone_ring_preserves_key_routing(allocator, key, expected):
+    ring = routing.ConsistentHashRing(allocator)
+    ring.replace(["cache1:11211-a", "cache2:11211-b", "cache3:11211-c"])
+    assert ring.get_node(key).addr == expected
+    assert len(ring.points) == 480
+
+
+def test_ring_detaches_nodes_for_cleanup_without_discovery(allocator):
+    ring = routing.ConsistentHashRing(allocator)
+    ring.replace(["cache1:11211-a", "cache2:11211-b"])
+    nodes = ring.detach()
+    assert len(nodes) == 2
+    assert not ring.nodes
+    assert not ring.points
+    for node in nodes:
+        node.close.assert_not_called()
+    with pytest.raises(ArcusNodeConnectionException, match="no available"):
+        ring.get_node("key")
+
+
+def test_locator_routes_membership_from_a_discovery_collaborator(
+    allocator, monkeypatch
+):
+    snapshots = []
+    source = SimpleNamespace(client=None, path=None, close=Mock())
+
+    def make_discovery(on_membership):
+        snapshots.append(on_membership)
+        source.connect = lambda addr, code: on_membership(["cache1:11211-a"])
+        return source
+
+    monkeypatch.setattr(routing, "ZooKeeperDiscovery", make_discovery)
+    locator = ArcusLocator(allocator)
+    locator.connect("membership-source", "service")
+    assert locator.get_node("key").addr == "cache1:11211"
+    snapshots[0](["cache2:11211-b"])
+    current = locator.get_node("key")
+    assert current.addr == "cache2:11211"
+    locator.disconnect()
+    source.close.assert_called_once_with()
+    current.close.assert_called_once_with()
+    allocator.close.assert_called_once_with()
+    snapshots[0](["cache3:11211-c"])
+    assert not locator.addr_node_map
+    assert allocator.alloc.call_count == 2
