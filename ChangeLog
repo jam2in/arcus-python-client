@@ -1,4 +1,10 @@
 # Unreleased
+  - Compose KV, List, Set and BTree APIs around shared routing and request execution.
+  - Separate command construction and response parsing from node transport lifetime.
+  - Exchange immutable command requests through a narrow submit interface.
+  - Separate ZooKeeper discovery, consistent hash ring and locator lifecycle.
+  - Return complete node statistics and correct Set drop/pipe command construction.
+  - Recognize successful collection deletion with DELETED_DROPPED.
   - Package the core client for Python 3.11+ with pyproject.toml.
   - Separate client, routing, encoding, results and protocol classes under src/arcus.
   - Preserve existing imports and move administration utilities under tools/.

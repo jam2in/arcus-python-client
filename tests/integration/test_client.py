@@ -90,6 +90,34 @@ def test_set_collection(client, key_factory, result, cache_ttl):
     assert result(client.sop_exist(key, "absent")) is False
 
 
+def test_delete_final_set_element_drops_collection(
+    client, key_factory, result, cache_ttl
+):
+    key = key_factory("set-drop")
+    assert (
+        result(client.sop_create(key, ArcusTranscoder.FLAG_STRING, exptime=cache_ttl))
+        is True
+    )
+    assert result(client.sop_insert(key, "last")) is True
+    assert result(client.sop_delete(key, "last", drop=True)) is True
+    assert result(client.sop_get(key)) is None
+    assert result(client.set(key, "usable", exptime=cache_ttl)) is True
+    assert result(client.get(key)) == "usable"
+
+
+def test_node_statistics_are_complete_and_leave_connection_usable(
+    client, key_factory, result, cache_ttl
+):
+    key = key_factory("stats")
+    node = client.locator.get_node(key)
+    statistics = result(node.get_stats())
+    assert statistics["version"]
+    assert int(statistics["curr_connections"]) > 0
+    assert all(isinstance(value, str) for value in statistics.values())
+    assert result(client.set(key, "after stats", exptime=cache_ttl)) is True
+    assert result(client.get(key)) == "after stats"
+
+
 def test_btree_collection(client, key_factory, result, cache_ttl):
     key = key_factory("btree")
     flags = ArcusTranscoder.FLAG_LONG

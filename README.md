@@ -34,15 +34,20 @@ publish a release to a package index.
 ```text
 src/
   arcus/
-    client.py          # Public Arcus API
-    routing.py         # Consistent hashing and ZooKeeper discovery
+    client.py          # Compatible public Arcus facade
+    api/               # KV/List/Set/BTree APIs and routed request execution
+    routing.py         # Consistent hash ring and locator lifecycle
+    discovery.py       # ZooKeeper sessions, watches and member snapshots
     transcoder.py      # Value encoding and decoding
     operation.py       # Asynchronous results and aggregation
     collections.py     # Python List/Set wrappers
     exceptions.py      # Public error types
     protocol/
+      commands/        # Per-type command objects and shared collection encoding
+      responses/       # Per-type response objects and shared byte reader
+      request.py       # Immutable command message and submit capability
       connection.py    # Socket I/O, buffering and timeouts
-      node.py          # Node state, commands and response parsing
+      node.py          # Transport/operation lifetime and compatibility delegates
       worker.py        # Request worker and Linux epoll loop
       allocator.py     # Node construction and worker lifecycle
       filter.py        # B+Tree element-flag filters
@@ -60,6 +65,12 @@ Implementation modules own their responsibilities; `arcus.__init__` exposes the
 public classes. Applications can keep existing imports or import classes from
 their specific modules. Install the package, including an editable install for
 development, before running it from a checkout.
+
+The facade composes data-type APIs, command objects submit immutable requests,
+and response objects return decoded values to the node for operation completion.
+ZooKeeper discovery publishes membership snapshots to a separate hash ring through
+the locator. See [object responsibilities and request flow](docs/architecture.md)
+for the collaboration boundaries, state ownership and compatibility details.
 
 ## Usage
 
