@@ -238,10 +238,10 @@ class ArcusSet:
             return iter(self.arcus.sop_get(self.key).get_result())
 
     def add(self, value):
-        if self.cache != None:
-            self.cache[value] = True
-
-        return self.arcus.sop_insert(self.key, value).get_result()
+        result = self.arcus.sop_insert(self.key, value).get_result()
+        if result is True and self.cache is not None:
+            self.cache.add(value)
+        return result
 
     def invalidate(self):
         if self.cache != None:

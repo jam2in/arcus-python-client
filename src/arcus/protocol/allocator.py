@@ -72,19 +72,32 @@ class ArcusMCNodeAllocator:
             nodes = tuple(self._nodes)
             self._nodes.clear()
             worker = self.worker
+        first_error = None
         for node in nodes:
-            with node._io_lock:
-                node._closed = True
-                node.disconnect()
+            try:
+                with node._io_lock:
+                    node._closed = True
+                    node.disconnect()
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
         if worker is not None:
-            worker.q.put(None)
-            if threading.current_thread() is not worker:
-                worker.join()
-            while True:
-                try:
-                    worker.q.get_nowait()
-                except queue.Empty:
-                    break
+            # Wake an idle worker even when a node could not finish closing.
+            try:
+                worker.q.put(None)
+                if threading.current_thread() is not worker:
+                    worker.join()
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+            finally:
+                while True:
+                    try:
+                        worker.q.get_nowait()
+                    except queue.Empty:
+                        break
+        if first_error is not None:
+            raise first_error
 
     def join(self):
         if self.worker is not None:

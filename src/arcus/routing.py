@@ -90,6 +90,8 @@ class ConsistentHashRing:
 
     The locator synchronizes access. Replacement publishes only after all new
     nodes and hash points are built, preserving the old ring on allocation errors.
+    Retirement errors are logged after publication, so discovery can record the
+    committed snapshot even if a removed node cannot be fully closed yet.
     """
 
     def __init__(self, node_allocator):
@@ -133,16 +135,16 @@ class ConsistentHashRing:
         self.points = points
         for node in nodes.values():
             node.in_use = True
-        first_error = None
         for node in removed:
             node.in_use = False
             try:
                 node.close()
             except Exception as error:
-                if first_error is None:
-                    first_error = error
-        if first_error is not None:
-            raise first_error
+                # The replacement is already visible. Reporting this as a failed
+                # publication would let discovery accept an older snapshot.
+                # The allocator still owns nodes whose close did not finish and
+                # retries their cleanup when the client is disconnected.
+                arcuslog(self, "node retirement failed: ", node.addr, error)
 
     def detach(self):
         """Unpublish nodes so their potentially blocking cleanup can run unlocked."""

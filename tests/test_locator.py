@@ -272,6 +272,88 @@ def test_out_of_order_discovery_completion_keeps_newest_snapshot(locator, monkey
     assert set(locator.addr_node_map) == {"cache3:11211"}
 
 
+def test_retirement_failure_cannot_restore_an_older_membership(
+    locator, allocator, monkeypatch
+):
+    zk = configured_zk(["cache1:11211-a", "cache2:11211-b"])
+    monkeypatch.setattr(discovery, "KazooClient", Mock(return_value=zk))
+    log = Mock()
+    monkeypatch.setattr(routing, "arcuslog", log)
+    locator.connect("zookeeper:2181", "service")
+    first, second = locator.addr_node_map.values()
+    retirement_error = OSError("socket close failed")
+    first.close.side_effect = retirement_error
+    older, newer = Mock(), Mock()
+    older.get.return_value = ["cache1:11211-a", "cache2:11211-b"]
+    newer.get.return_value = ["cache3:11211-c"]
+    zk.get_children_async.side_effect = [older, newer]
+    watch = zk.get_children_async.call_args.kwargs["watch"]
+    try:
+        watch(SimpleNamespace(type="CHILD", path="unused"))
+        watch(SimpleNamespace(type="CHILD", path="unused"))
+        newer.rawlink.call_args.args[0](newer)
+        current = locator.get_node("key")
+        assert current.addr == "cache3:11211"
+        assert locator._discovery._refresh_applied == 3
+        first.close.assert_called_once_with()
+        second.close.assert_called_once_with()
+        assert not first.in_use and not second.in_use
+        log.assert_any_call(
+            locator._ring, "node retirement failed: ", first.addr, retirement_error
+        )
+
+        older.rawlink.call_args.args[0](older)
+        assert set(locator.addr_node_map) == {"cache3:11211"}
+        assert locator.get_node("key") is current
+        assert locator._discovery._refresh_applied == 3
+        assert allocator.alloc.call_count == 3
+        current.close.assert_not_called()
+    finally:
+        locator.disconnect()
+    current.close.assert_called_once_with()
+    allocator.close.assert_called_once_with()
+    zk.stop.assert_called_once_with()
+    zk.close.assert_called_once_with()
+
+
+def test_failed_allocation_does_not_mark_the_snapshot_as_applied(
+    locator, allocator, monkeypatch
+):
+    zk = configured_zk(["cache1:11211-a"])
+    monkeypatch.setattr(discovery, "KazooClient", Mock(return_value=zk))
+    locator.connect("zookeeper:2181", "service")
+    original = locator.get_node("key")
+    incomplete = make_node("cache3:11211")
+    replacement = make_node("cache2:11211")
+    allocator.alloc.side_effect = [
+        incomplete,
+        RuntimeError("allocation failed"),
+        replacement,
+    ]
+    older, newer = Mock(), Mock()
+    older.get.return_value = ["cache2:11211-b"]
+    newer.get.return_value = ["cache3:11211-c", "cache4:11211-d"]
+    zk.get_children_async.side_effect = [older, newer]
+    watch = zk.get_children_async.call_args.kwargs["watch"]
+    try:
+        watch(SimpleNamespace(type="CHILD", path="unused"))
+        watch(SimpleNamespace(type="CHILD", path="unused"))
+        newer.rawlink.call_args.args[0](newer)
+        assert locator.get_node("key") is original
+        assert locator._discovery._refresh_applied == 1
+        original.close.assert_not_called()
+        incomplete.close.assert_called_once_with()
+
+        older.rawlink.call_args.args[0](older)
+        assert locator.get_node("key") is replacement
+        assert locator._discovery._refresh_applied == 2
+        original.close.assert_called_once_with()
+    finally:
+        locator.disconnect()
+    replacement.close.assert_called_once_with()
+    allocator.close.assert_called_once_with()
+
+
 def test_reconnection_during_initial_snapshot_registers_a_new_watch(
     locator, monkeypatch
 ):
