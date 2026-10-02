@@ -29,7 +29,8 @@ worker uses Linux `epoll`. Each test uses UUID-prefixed keys, explicit deletion,
 and a 120-second cache TTL. Result waits have a separate five-second limit.
 
 The suite covers primitive value round trips, cache misses, deletion, counters,
-CAS, List/Set/B+Tree operations, collection errors followed by another request,
+CAS, List/Set/B+Tree operations through `kv`/`lop`/`sop`/`bop`, BTree deletion
+and reuse after dropping a collection, collection errors followed by another request,
 and a shared client making concurrent requests across both nodes. It is a basic
 correctness suite; performance, node changes, session expiration, and sustained
 failure/recovery experiments remain separate validation work.

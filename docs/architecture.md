@@ -1,17 +1,20 @@
 # Object responsibilities and collaboration
 
-The public `Arcus` facade composes data-type APIs. Each node composes command and
+The public `Arcus` facade exposes composed data-type APIs as `kv`, `lop`, `sop`
+and `bop`. Each API object has explicit methods such as `client.bop.delete()`. Each node composes command and
 response objects around one transport. Components communicate through explicit
 method calls, immutable command messages, membership callbacks and asynchronous
-operation results. There are no command mixins, dynamic method forwarding or
-new cache commands.
+operation results. Command implementations use composition. Explicit deprecated adapters live in
+`arcus._compat` and are inherited only to preserve old entry points; new request
+paths bypass them. There is no dynamic method forwarding or new cache command.
 
 ## Responsibilities
 
 | Object | Owns | Collaborates through |
 | --- | --- | --- |
-| `Arcus` | Existing public method signatures and collection-wrapper access | Four API objects and the locator lifecycle |
-| `KeyValueAPI`, `ListAPI`, `SetAPI`, `BTreeAPI` | Data-type API dispatch; BTree multi-node result assembly | Shared `RequestExecutor` and existing node command methods |
+| `Arcus` | Public `kv`/`lop`/`sop`/`bop` objects and client lifetime | Four API objects sharing the locator |
+| Compatibility adapters | Deprecated flat client and node method signatures | Explicit forwarding to the current API with a migration warning |
+| `KeyValueAPI`, `ListAPI`, `SetAPI`, `BTreeAPI` | Data-type API dispatch; BTree multi-node result assembly | Shared `RequestExecutor` and node command objects |
 | `RequestExecutor` | Destination lookup and key grouping | `ArcusLocator.get_node()` and an explicit node operation callable |
 | `ZooKeeperDiscovery` | ZooKeeper connection, watches, session recovery, snapshot ordering and startup deadline | A callback carrying a list of member names |
 | `ConsistentHashRing` | Hash points, node allocation/reuse/retirement and key placement | Node allocator; no ZooKeeper dependency |
@@ -35,9 +38,8 @@ flowchart TD
     Executor --> Locator[ArcusLocator]
     Locator --> Ring[ConsistentHashRing]
     Discovery[ZooKeeperDiscovery] -->|membership snapshot| Locator
-    Executor -->|existing command method| Node[ArcusMCNode]
-    Node -->|delegate command construction| Commands[Data-type command object]
-    Commands -->|CommandRequest via submit| Node
+    Executor -->|selected node.commands| Commands[Data-type command object]
+    Commands -->|CommandRequest via submit| Node[ArcusMCNode]
     Node --> Worker[Worker / poller]
     Worker -->|send or receive readiness| Node
     Node --> Connection
@@ -50,9 +52,9 @@ flowchart TD
 
 ## A get request and its response
 
-1. `Arcus.get(key)` delegates to `KeyValueAPI`. Its shared executor resolves the
-   key through the locator and invokes the selected node's compatible `get()`.
-2. The node delegates command construction to `KVCommands`. That object produces
+1. `client.kv.get(key)` calls `KeyValueAPI`. Its shared executor resolves the
+   key through the locator and invokes the selected node's `commands.kv.get()`.
+2. `KVCommands` produces
    a frozen `CommandRequest` containing the wire bytes and `KVResponses.value`
    callback. It knows only the submit capability, codec and response handlers.
 3. `ArcusMCNode.submit()` creates an operation and registers its generation,
@@ -99,8 +101,13 @@ Key-list wire lengths count encoded UTF-8 bytes.
 
 Existing imports, `Arcus`/`ArcusMCNode` method signatures, key placement and normal
 asynchronous result contracts are preserved. `client.locator` remains replaceable.
-The existing List/Set Python wrappers still refer to the same public client.
-Map commands are not implemented and were not added in this refactor.
+The List/Set Python wrappers still refer to the same public client and invoke its
+`lop`/`sop` APIs. `client.lop.wrap()` and `client.sop.wrap()` construct them;
+`alloc()` retains the existing create-and-wrap behavior.
+Flat client and node command methods, the old `arcus_mc_node` import and the
+`enable_log()` convenience are deprecated. Current top-level public class exports
+and locator state views remain supported. See [the migration guide](migration.md)
+for replacements and logging configuration. Map commands remain unimplemented.
 
 Discovery/ring state is now owned by its collaborators. `locator.zk`,
 `locator.node_list` and `locator.addr_node_map` expose read views; replacing those

@@ -26,7 +26,7 @@ python -m pip install dist/arcus_python_client-1.0.0-py3-none-any.whl
 ```
 
 The distribution contains the `arcus` package and a small `arcus_mc_node`
-compatibility module. Existing imports remain valid. Creating a wheel does not
+deprecated compatibility module. Existing imports remain valid with a warning. Creating a wheel does not
 publish a release to a package index.
 
 ## Project structure
@@ -34,8 +34,10 @@ publish a release to a package index.
 ```text
 src/
   arcus/
-    client.py          # Compatible public Arcus facade
+    client.py          # Arcus lifecycle and public kv/lop/sop/bop objects
     api/               # KV/List/Set/BTree APIs and routed request execution
+    _compat/           # Deprecated flat client and node command adapters
+    _logging.py        # Standard logging under the arcus logger
     routing.py         # Consistent hash ring and locator lifecycle
     discovery.py       # ZooKeeper sessions, watches and member snapshots
     transcoder.py      # Value encoding and decoding
@@ -47,11 +49,11 @@ src/
       responses/       # Per-type response objects and shared byte reader
       request.py       # Immutable command message and submit capability
       connection.py    # Socket I/O, buffering and timeouts
-      node.py          # Transport/operation lifetime and compatibility delegates
+      node.py          # Transport and operation lifetime
       worker.py        # Request worker and Linux epoll loop
       allocator.py     # Node construction and worker lifecycle
       filter.py        # B+Tree element-flag filters
-  arcus_mc_node.py      # Compatibility imports
+  arcus_mc_node.py      # Deprecated compatibility imports
 tests/
   integration/         # Real Arcus and ZooKeeper tests
   legacy/              # Original manual smoke script
@@ -62,8 +64,8 @@ docs/                  # Validation scope and acceptance criteria
 ```
 
 Implementation modules own their responsibilities; `arcus.__init__` exposes the
-public classes. Applications can keep existing imports or import classes from
-their specific modules. Install the package, including an editable install for
+public classes. Applications can import these public classes or use their specific modules.
+The former flat `arcus_mc_node` module is deprecated. Install the package, including an editable install for
 development, before running it from a checkout.
 
 The facade composes data-type APIs, command objects submit immutable requests,
@@ -85,11 +87,17 @@ allocator = ArcusMCNodeAllocator(
 client = Arcus(ArcusLocator(allocator))
 client.connect("localhost:2181", "test")
 try:
-    client.set("example:key", "hello", exptime=60).get_result(timeout=5)
-    assert client.get("example:key").get_result(timeout=5) == "hello"
+    client.kv.set("example:key", "hello", exptime=60).get_result(timeout=5)
+    assert client.kv.get("example:key").get_result(timeout=5) == "hello"
 finally:
     client.disconnect()
 ```
+
+Use `client.kv` for key/value commands, `client.lop` for lists, `client.sop` for
+sets and `client.bop` for B+Trees. For example, `client.bop.delete(key, range)`
+replaces `client.bop_delete(key, range)`. Old flat methods remain available with
+`DeprecationWarning`. See [API migration and logging configuration](docs/migration.md)
+for the complete mapping, collection wrappers and standard `logging` setup.
 
 `exptime` is the cache item's expiration time. It is separate from socket timeouts
 and the timeout accepted by an operation's `get_result()` method.

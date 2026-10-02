@@ -1,4 +1,7 @@
 # Unreleased
+  - Expose composed kv/lop/sop/bop APIs, including client.bop.delete().
+  - Deprecate flat client/node command adapters and the arcus_mc_node import.
+  - Route diagnostics through standard logging and deprecate enable_log().
   - Read collection payloads by byte length and isolate partial parsing failures.
   - Consume Set existence pipelines and reject failed or malformed pipeline frames.
   - Apply global smget direction, offset and count across nodes with binary BKey ordering.

@@ -10,7 +10,7 @@ import pytest
 from kazoo.client import KazooClient
 
 from arcus import Arcus, ArcusLocator, ArcusTranscoder
-from arcus_mc_node import ArcusMCNodeAllocator
+from arcus import ArcusMCNodeAllocator
 
 OPERATION_TIMEOUT = 5
 CACHE_TTL = 120
@@ -81,7 +81,7 @@ def key_factory(client):
     for key in keys:
         remaining = cleanup_deadline - time.monotonic()
         assert remaining > 0, "Test key cleanup exceeded its deadline"
-        client.delete(key).get_result(timeout=min(OPERATION_TIMEOUT, remaining))
+        client.kv.delete(key).get_result(timeout=min(OPERATION_TIMEOUT, remaining))
 
 
 @pytest.fixture

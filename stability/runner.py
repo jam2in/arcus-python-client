@@ -20,7 +20,7 @@ from uuid import uuid4
 
 from kazoo.client import KazooClient
 from arcus import Arcus, ArcusException, ArcusLocator, ArcusTranscoder
-from arcus_mc_node import ArcusMCNodeAllocator
+from arcus import ArcusMCNodeAllocator
 
 RESULTS = Path("/results")
 PREFIX = "stability:" + uuid4().hex
@@ -230,7 +230,7 @@ class Harness:
         with LOG_LOCK:
             REQUESTS.write(json.dumps({**entry, "status": "submitted"}) + "\n")
         try:
-            operation = getattr(self.client, command)(*args, **kwargs)
+            operation = getattr(self.client.kv, command)(*args, **kwargs)
             entry["enqueued"] = time.monotonic()
             entry["node"] = getattr(getattr(operation, "node", None), "addr", None)
             value = operation.get_result(timeout=WAIT_TIMEOUT)
@@ -338,21 +338,23 @@ class Harness:
                 key = f"{PREFIX}:multiple:{worker}"
                 for revision in range(12):
                     value = f"{worker}:{revision}"
-                    assert client.set(key, value, exptime=TTL).get_result(WAIT_TIMEOUT)
-                    assert client.get(key).get_result(WAIT_TIMEOUT) == value
+                    assert client.kv.set(key, value, exptime=TTL).get_result(
+                        WAIT_TIMEOUT
+                    )
+                    assert client.kv.get(key).get_result(WAIT_TIMEOUT) == value
                 collection = key + ":list"
-                assert client.lop_create(
+                assert client.lop.create(
                     collection, ArcusTranscoder.FLAG_STRING, exptime=TTL
                 ).get_result(WAIT_TIMEOUT)
                 expected = []
                 for revision in range(6):
                     value = f"{worker}:{revision}"
                     expected.append(value)
-                    assert client.lop_insert(collection, -1, value).get_result(
+                    assert client.lop.insert(collection, -1, value).get_result(
                         WAIT_TIMEOUT
                     )
                     assert (
-                        client.lop_get(collection, (0, -1)).get_result(WAIT_TIMEOUT)
+                        client.lop.get(collection, (0, -1)).get_result(WAIT_TIMEOUT)
                         == expected
                     )
                 record(
@@ -489,7 +491,7 @@ class Harness:
             wait_until(
                 lambda: not self.locator.addr_node_map, description="empty membership"
             )
-            self.expect_fault(lambda: self.client.get(PREFIX + ":empty"))
+            self.expect_fault(lambda: self.client.kv.get(PREFIX + ":empty"))
             self.membership()
         finally:
             for child, data in entries.items():

@@ -21,7 +21,7 @@ import psutil
 from pymemcache.client.base import Client
 
 from arcus import Arcus, ArcusLocator, ArcusTranscoder
-from arcus_mc_node import ArcusMCNodeAllocator
+from arcus import ArcusMCNodeAllocator
 
 TTL = 300
 TIMEOUT = 5
@@ -52,19 +52,19 @@ class Adapter:
 
     def set(self, key, value):
         if self.name == "arcus-python":
-            return done(self.client.set(key, value, exptime=TTL))
+            return done(self.client.kv.set(key, value, exptime=TTL))
         with self.lock:
             return self.client.set(key, value, expire=TTL, flags=2048, noreply=False)
 
     def get(self, key):
         if self.name == "arcus-python":
-            return done(self.client.get(key))
+            return done(self.client.kv.get(key))
         with self.lock:
             return self.client.get(key)
 
     def delete(self, key):
         if self.name == "arcus-python":
-            return done(self.client.delete(key))
+            return done(self.client.kv.delete(key))
         with self.lock:
             return self.client.delete(key, noreply=False)
 
@@ -156,22 +156,22 @@ def setup(adapter, operation, keys, payload, elements):
     key = keys[0]
     values = [f"{index:08d}".encode() + payload for index in range(elements)]
     if operation == "list-get":
-        assert done(client.lop_create(key, 2048, exptime=TTL)) is True
+        assert done(client.lop.create(key, 2048, exptime=TTL)) is True
         for value in values:
-            assert done(client.lop_insert(key, -1, value)) is True
-        return lambda index: done(client.lop_get(key, (0, elements - 1))) == values
+            assert done(client.lop.insert(key, -1, value)) is True
+        return lambda index: done(client.lop.get(key, (0, elements - 1))) == values
     if operation == "set-get":
-        assert done(client.sop_create(key, 2048, exptime=TTL)) is True
+        assert done(client.sop.create(key, 2048, exptime=TTL)) is True
         for value in values:
-            assert done(client.sop_insert(key, value)) is True
+            assert done(client.sop.insert(key, value)) is True
         expected = set(values)
-        return lambda index: done(client.sop_get(key)) == expected
+        return lambda index: done(client.sop.get(key)) == expected
     if operation == "btree-get":
-        assert done(client.bop_create(key, 2048, exptime=TTL)) is True
+        assert done(client.bop.create(key, 2048, exptime=TTL)) is True
         for index, value in enumerate(values):
-            assert done(client.bop_insert(key, index, value, "0x01")) is True
+            assert done(client.bop.insert(key, index, value, "0x01")) is True
         expected = {index: ("0x01", value) for index, value in enumerate(values)}
-        return lambda index: done(client.bop_get(key, (0, elements - 1))) == expected
+        return lambda index: done(client.bop.get(key, (0, elements - 1))) == expected
     raise ValueError(operation)
 
 
