@@ -349,6 +349,18 @@ def make_commands():
     return CommandHandlers(submitter, transcoder, responses), submitter, responses
 
 
+@pytest.mark.parametrize("method", ["mget", "smget"])
+def test_multi_key_header_measures_utf8_payload_bytes(method):
+    handlers, submitter, _ = make_commands()
+    keys = ["한글", "café", "emoji😀"]
+
+    getattr(handlers.btree, method)(keys, (0, 10), count=2)
+
+    header, payload = submitter.requests[0].payload.split(b"\r\n", 1)
+    assert payload == ",".join(keys).encode("utf-8")
+    assert header == f"bop {method} {len(payload)} 3 0..10 2".encode("ascii")
+
+
 @pytest.mark.parametrize("entry", WIRE_CASES)
 @pytest.mark.parametrize("entrypoint", ["command", "legacy_node"])
 def test_wire_bytes_response_contract_and_operation_identity(entry, entrypoint):

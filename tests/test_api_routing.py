@@ -163,8 +163,8 @@ def test_smget_merges_completed_results_without_waiting_during_dispatch():
 
     operations = client.bop_smget(["a", "b"], (0, 10))
 
-    first.bop_smget.assert_called_once_with(["a"], (0, 10), None, None, 2000)
-    second.bop_smget.assert_called_once_with(["b"], (0, 10), None, None, 2000)
+    first.bop_smget.assert_called_once_with(["a"], (0, 10), None, 0, 2000)
+    second.bop_smget.assert_called_once_with(["b"], (0, 10), None, 0, 2000)
     assert not operations.has_result()
     first.bop_smget.return_value.set_result((first_result, ["z"]))
     second.bop_smget.return_value.set_result((second_result, ["x"]))

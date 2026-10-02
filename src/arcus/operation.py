@@ -20,9 +20,21 @@
 
 import queue
 import time
+from heapq import merge
+from itertools import islice
 from threading import Event, Lock
 
 from .exceptions import ArcusNodeConnectionException
+
+
+def _bkey_order(bkey):
+    # Binary BKeys use bytewise lexicographic order, independent of hex casing.
+    return bytes.fromhex(bkey[2:]) if isinstance(bkey, str) else bkey
+
+
+def _smget_order(element):
+    # Flags and values are not part of the server's comparison contract.
+    return _bkey_order(element[0]), element[1].encode("utf-8")
 
 
 class ArcusOperation:
@@ -77,7 +89,7 @@ class ArcusOperation:
 
 
 class ArcusOperationList:
-    def __init__(self, cmd):
+    def __init__(self, cmd, *, bkey_range=None, offset=0, count=None):
         self.ops = []
         self.cmd = cmd
         self.result = None
@@ -85,6 +97,11 @@ class ArcusOperationList:
         self.invalid = False
         self._result_lock = Lock()
         self._result_error = None
+        self._offset = offset
+        self._count = count
+        self._reverse = isinstance(bkey_range, tuple) and _bkey_order(
+            bkey_range[0]
+        ) > _bkey_order(bkey_range[1])
 
         self.noreply = False
         self.pipe = False
@@ -175,14 +192,11 @@ class ArcusOperationList:
                 result.update(a)
 
         else:  # bop smget
-            # Copy child results so concurrent readers and later reads retain them.
-            pending = [list(values) for values in tmp_result if values]
-            result = []
-            while pending:
-                idx = min(range(len(pending)), key=lambda i: pending[i][0])
-                result.append(pending[idx].pop(0))
-                if not pending[idx]:
-                    pending.pop(idx)
+            # Node replies are already sorted. Merge without mutating child values,
+            # then apply the query's global page exactly once.
+            merged = merge(*tmp_result, key=_smget_order, reverse=self._reverse)
+            stop = None if self._count is None else self._offset + self._count
+            result = list(islice(merged, self._offset, stop))
 
         missed_key.sort()
         with self._result_lock:

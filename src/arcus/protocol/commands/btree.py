@@ -165,12 +165,8 @@ class BTreeCommands:
         )
 
     def _coll_mget(self, org_cmd, key_list, range, filter, offset, count):
-        comma_sep_keys = ""
-        for key in key_list:
-            if comma_sep_keys != "":
-                comma_sep_keys += ","
-            comma_sep_keys += key
-        cmd = "%s %d %d " % (org_cmd, len(comma_sep_keys), len(key_list))
+        key_payload = ",".join(key_list).encode("utf-8")
+        cmd = "%s %d %d " % (org_cmd, len(key_payload), len(key_list))
         if isinstance(range, tuple):
             if isinstance(range[0], str):
                 if range[0][:2] != "0x" or range[1][:2] != "0x":
@@ -189,8 +185,7 @@ class BTreeCommands:
         if offset != None:
             cmd += " %d" % offset
         cmd += " %d" % count
-        cmd += "\r\n%s" % comma_sep_keys
-        cmd = bytes(cmd, "utf-8")
+        cmd = cmd.encode("utf-8") + b"\r\n" + key_payload
         if org_cmd == "bop mget":
             reply = self._responses.mget
         else:

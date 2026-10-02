@@ -97,7 +97,18 @@ class BTreeAPI:
         return operations
 
     def smget(self, key_list, range, filter=None, offset=None, count=2000):
-        operations = ArcusOperationList("bop smget")
-        for node, keys in self._executor.group_by_node(key_list).items():
-            operations.add_op(node.bop_smget(keys, range, filter, offset, count))
+        groups = self._executor.group_by_node(key_list)
+        multi_node = len(groups) > 1
+        merge_offset = (offset or 0) if multi_node else 0
+        operations = ArcusOperationList(
+            "bop smget", bkey_range=range, offset=merge_offset, count=count
+        )
+        # A node cannot determine which of its elements precede the global offset.
+        # Fetch the whole prefix from every node and page the merged result.
+        node_offset = 0 if multi_node else offset
+        node_count = merge_offset + count if multi_node else count
+        for node, keys in groups.items():
+            operations.add_op(
+                node.bop_smget(keys, range, filter, node_offset, node_count)
+            )
         return operations
