@@ -30,6 +30,7 @@ find src benchmarks -type f ! -path '*/__pycache__/*' ! -path '*/target/*' \
 compose config > "$ARCUS_BENCH_RESULTS/compose.yaml"
 docker version > "$ARCUS_BENCH_RESULTS/docker-version.txt"
 compose build benchmark
+docker image inspect arcus-python-client-benchmark-benchmark > "$ARCUS_BENCH_RESULTS/image.json"
 compose up --detach register
 compose up --detach --wait --wait-timeout 120 cache1
 container_ids=$(compose ps --quiet)

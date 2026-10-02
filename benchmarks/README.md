@@ -67,6 +67,9 @@ p50/p95/p99 of **successful** samples, CPU time, process memory, and before/afte
 server statistics. `*-samples.json` stores every measured `[duration_ns,status]`;
 status 0 is success, 1 unsuccessful set, 2 mismatch, 3 timeout, 4 another exception.
 Errors are excluded from successful throughput/latency but retain raw durations.
+The summary tool also reports the maximum observed duration. A shared socket lock
+can starve an individual caller; its rare long waits can be hidden by request-weighted
+p99 even though they remain in the raw samples and maximum.
 All returned rows completed their requests; a killed or crashed run is incomplete
 and must not be interpreted as zero errors merely because a summary is absent.
 
@@ -87,7 +90,9 @@ limit the run. A single shared desktop cannot establish a dedicated-host baselin
 This separately samples the Python 1024-byte get path with four workers for 15 seconds
 using `py-spy==0.4.1` at 99 Hz. The benchmark container gets `SYS_PTRACE` so py-spy can
 inspect its child process; application containers do not receive that capability.
-`profile.json` uses speedscope format and includes all sampled Python threads.
+`profile-active.json` samples active Python threads; `profile-idle.json` also
+includes waiting threads, in two separate 15-second runs using speedscope format.
+Profiled rows are labeled and excluded by the summary tool.
 Profiling affects execution, so profiled measurements are diagnostic only. Use
 unprofiled repeated runs for comparisons and rerun them after any optimization.
 
@@ -96,3 +101,16 @@ Generate a comparison table from one unprofiled run:
 ```sh
 python benchmarks/summarize.py build/benchmarks/<run-id>
 ```
+
+Inspect profile stack shares with the standard library:
+
+```sh
+python benchmarks/profile_summary.py \
+  build/benchmarks/<profile-run>/profile-active.json \
+  build/benchmarks/<profile-run>/profile-idle.json
+```
+
+These shares include native calls and lock acquisition, even in the active profile.
+They identify paths to investigate; they are not exact CPU time or proof that removing
+a lock is safe. Keep correctness and connection-generation tests when testing a
+future concurrency optimization.

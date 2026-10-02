@@ -288,7 +288,7 @@ def main():
             "--format",
             "speedscope",
             "--output",
-            "/results/profile.json",
+            "/results/profile-active.json",
             "--",
             "python",
             "runner.py",
@@ -307,21 +307,43 @@ def main():
             "--warmup",
             "2",
         ]
-        subprocess.run(command, check=True, timeout=60)
+        for mode in ("active", "idle"):
+            invocation = list(command)
+            invocation[invocation.index("--output") + 1] = (
+                f"/results/profile-{mode}.json"
+            )
+            if mode == "idle":
+                invocation.insert(invocation.index("--"), "--idle")
+            subprocess.run(
+                invocation,
+                env={**os.environ, "ARCUS_BENCH_PROFILE": mode},
+                check=True,
+                timeout=60,
+            )
         return
     run_id = uuid4().hex[:12]
     metadata = {
         "run_id": run_id,
         "configuration": vars(args),
+        "profile_mode": os.environ.get("ARCUS_BENCH_PROFILE"),
         "python": platform.python_version(),
         "platform": platform.platform(),
         "cpu_count": os.cpu_count(),
         "packages": {
             name: version(name)
-            for name in ("arcus-python-client", "pymemcache", "psutil", "py-spy")
+            for name in (
+                "arcus-python-client",
+                "kazoo",
+                "pymemcache",
+                "psutil",
+                "py-spy",
+            )
         },
         "java_client": "com.navercorp.arcus:arcus-java-client:1.13.2",
         "java_zookeeper_client": "3.9.4 (overrides the published release's old dependency)",
+        "java_dependencies": sorted(
+            path.name for path in Path("/java/target/dependency").glob("*.jar")
+        ),
         "cache_connections": 1,
         "control_connection": "temporary stats connection outside measurement",
         "keys": 256,
@@ -376,6 +398,7 @@ def main():
         success = counts[0]
         result.update(
             case,
+            profile_mode=os.environ.get("ARCUS_BENCH_PROFILE"),
             run_id=run_id,
             case_index=index,
             issued=len(samples),
