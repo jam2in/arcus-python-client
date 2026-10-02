@@ -53,66 +53,26 @@ API 변경 사항과 로깅 설정은 [마이그레이션 가이드](docs/migrat
 
 ## 사용 방법
 
-다음 예제는 전용 테스트 서비스에서 실행하세요.
+ZooKeeper 주소(`localhost:2181`)와 서비스 코드(`test`)를 테스트 환경에 맞게 바꿔 실행합니다.
 
 ```python
 from arcus import Arcus, ArcusLocator, ArcusMCNodeAllocator, ArcusTranscoder
 
-allocator = ArcusMCNodeAllocator(
-    ArcusTranscoder(), connect_timeout=1, io_timeout=1, operation_timeout=5
-)
+allocator = ArcusMCNodeAllocator(ArcusTranscoder())
 client = Arcus(ArcusLocator(allocator))
 client.connect("localhost:2181", "test")
 try:
     client.kv.set("example:key", "hello", exptime=60).get_result(timeout=5)
-    assert client.kv.get("example:key").get_result(timeout=5) == "hello"
+    print(client.kv.get("example:key").get_result(timeout=5))
 finally:
     client.disconnect()
 ```
 
-키/값 명령은 `client.kv`, List는 `client.lop`, Set은 `client.sop`, B+Tree는
-`client.bop`을 사용합니다. 예를 들어 `client.bop_delete(key, range)` 대신
-`client.bop.delete(key, range)`를 호출합니다. 기존 메서드도
-`DeprecationWarning`과 함께 계속 사용할 수 있습니다. 전체 API 대응 관계,
-컬렉션 래퍼, 표준 `logging` 설정은
-[API 마이그레이션과 로깅 설정](docs/migration.md)을 참고하세요.
+키/값은 `client.kv`, List는 `client.lop`, Set은 `client.sop`, B+Tree는 `client.bop`을
+사용합니다. 명령 실행 결과는 `get_result()`로 받습니다.
 
-`exptime`은 캐시 항목의 만료 시간입니다. 소켓 타임아웃이나 요청 결과의
-`get_result()`에 전달하는 타임아웃과는 별개입니다. `get_result(timeout=5)`는
-해당 호출자의 대기 시간을 5초로 제한하며, 그 안에 결과가 준비되지 않으면
-`queue.Empty`를 발생시킵니다. 요청 작업 자체를 취소하지는 않으므로 나중에
-`get_result()`를 다시 호출해 결과를 받을 수 있습니다. 기본값인 `timeout=0`은
-요청 작업의 결과가 나올 때까지 기다립니다. 연결이 무효화되면 캐시 미스를 반환하는
-대신 `ArcusNodeConnectionException`을 발생시킵니다.
-
-allocator의 기본값은 연결 타임아웃 1초, 소켓 I/O 타임아웃 1초, 요청 제출 시점부터
-계산하는 작업 완료 기한 5초입니다. 세 값 모두 유한한 양수여야 합니다. 소켓 또는
-작업 타임아웃이 발생하면 `TimeoutError`를 발생시킵니다. 연결 실패로 다른 처리 중인
-요청도 무효화될 수 있습니다. poller는 응답이 없는 연결을 주기적으로 확인합니다.
-응답 파싱에 블로킹 I/O를 사용하므로 다른 노드의 처리가 기한 초과 감지를 늦출 수
-있습니다. 따라서 이 설정이 모든 부하 조건에서 엄격한 종단 간 응답 시간 상한을
-보장하는 것은 아닙니다.
-
-실패했거나 일부만 전송된 요청은 자동으로 재전송하지 않습니다. `noreply` 요청은
-소켓 쓰기가 성공하면 완료되지만, 서버에서 실행까지 끝났다는 뜻은 아닙니다.
-`disconnect()`는 노드, 작업 스레드, epoll 및 ZooKeeper 자원을 해제합니다.
-연결을 종료한 뒤 같은 클라이언트로 다시 연결할 수 있습니다.
-
-최초 ZooKeeper 연결과 노드 조회는 합계 15초의 대기 제한을 공유합니다. 실패하면
-클라이언트 자원을 해제합니다. 캐시 노드 연결과 정리에는 별도의 시간이 소요되며,
-이 대기 제한은 allocator의 캐시 요청 제한과 별개입니다. 재연결 후에는 discovery가
-비동기적으로 노드 구성을 갱신하므로, ZooKeeper 조회가 이미 알려진 캐시 노드 목록을
-이용하는 요청 라우팅을 막지 않습니다.
-
-기존 스모크 테스트 스크립트는 실제 서비스에서 기본 동작을 확인합니다.
-
-```sh
-python tests/legacy/client_smoke.py <ZOOKEEPER_HOSTS> <SERVICE_CODE>
-```
-
-이 스크립트는 고정된 테스트 키에 데이터를 쓰므로 격리된 서비스가 필요합니다.
-스크립트를 import하는 것만으로도 실행되며, 기본 테스트 탐색에서는
-`tests/legacy/`를 제외합니다.
+타임아웃은 [설정과 오류 처리](docs/configuration.ko.md), 기존 API와 로깅은
+[마이그레이션 가이드](docs/migration.md)를 참고하세요.
 
 ## 개발
 

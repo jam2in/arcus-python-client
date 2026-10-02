@@ -40,7 +40,7 @@ Distinguish the following limits when interpreting an outcome:
 | `get_result(timeout=...)` | One caller's result wait; integration uses five seconds |
 | Test watchdog | Test-process protection; integration uses 45 seconds per test and 180 seconds overall |
 
-Runtime defaults and configuration are described in the repository README.
+Runtime defaults and configuration are described in the [configuration guide](configuration.md).
 A caller timing out does not establish whether a write executed on the server.
 Do not automatically retry increments or collection inserts after an ambiguous
 failure. A watchdog terminating the process is a failed test, not successful

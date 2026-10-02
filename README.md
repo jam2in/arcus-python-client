@@ -52,64 +52,27 @@ and logging configuration.
 
 ## Usage
 
-Run this example against a dedicated test service:
+Replace the ZooKeeper address (`localhost:2181`) and service code (`test`) with
+those of your test service.
 
 ```python
 from arcus import Arcus, ArcusLocator, ArcusMCNodeAllocator, ArcusTranscoder
 
-allocator = ArcusMCNodeAllocator(
-    ArcusTranscoder(), connect_timeout=1, io_timeout=1, operation_timeout=5
-)
+allocator = ArcusMCNodeAllocator(ArcusTranscoder())
 client = Arcus(ArcusLocator(allocator))
 client.connect("localhost:2181", "test")
 try:
     client.kv.set("example:key", "hello", exptime=60).get_result(timeout=5)
-    assert client.kv.get("example:key").get_result(timeout=5) == "hello"
+    print(client.kv.get("example:key").get_result(timeout=5))
 finally:
     client.disconnect()
 ```
 
 Use `client.kv` for key/value commands, `client.lop` for lists, `client.sop` for
-sets and `client.bop` for B+Trees. For example, `client.bop.delete(key, range)`
-replaces `client.bop_delete(key, range)`. Old flat methods remain available with
-`DeprecationWarning`. See [API migration and logging configuration](docs/migration.md)
-for the complete mapping, collection wrappers and standard `logging` setup.
+sets and `client.bop` for B+Trees. Call `get_result()` to receive a command's result.
 
-`exptime` is the cache item's expiration time. It is separate from socket timeouts
-and the timeout accepted by an operation's `get_result()` method.
-`get_result(timeout=5)` limits that caller's wait to five seconds and raises
-`queue.Empty` when the result is not ready. It does not cancel the operation;
-calling `get_result()` again can retrieve a later result. The default `timeout=0`
-waits for the operation's eventual result. Connection invalidation raises
-`ArcusNodeConnectionException` instead of returning a cache miss.
-
-The allocator defaults are a one-second connection timeout, a one-second socket
-I/O timeout, and a five-second operation deadline measured from submission. All
-three must be finite and positive. Socket and operation timeouts raise
-`TimeoutError`; a failed connection can also invalidate other pending operations.
-The poller checks silent connections periodically. Because response parsing uses
-blocking I/O, another node can delay deadline detection; these limits do not
-constitute a strict end-to-end latency guarantee under arbitrary load.
-
-Failed or partially sent requests are not automatically replayed. `noreply`
-operations finish after the write succeeds, which does not confirm server-side
-execution. `disconnect()` releases nodes, workers, epoll and ZooKeeper resources;
-the same client can connect again after disconnecting.
-
-Initial ZooKeeper connection and discovery reads share a 15-second wait budget.
-Failure releases the client resources. Cache-node connection and cleanup time are
-additional; this budget is separate from the allocator's cache request limits.
-After reconnecting, discovery refreshes asynchronously so ZooKeeper reads do not
-block routing requests through the known cache-node list.
-
-The legacy smoke script exercises basic operations against a live service:
-
-```sh
-python tests/legacy/client_smoke.py <ZOOKEEPER_HOSTS> <SERVICE_CODE>
-```
-
-It writes fixed test keys and requires an isolated service. Importing that script
-also starts it; default test discovery excludes `tests/legacy/`.
+See [configuration and error handling](docs/configuration.md) for timeout settings,
+and [the migration guide](docs/migration.md) for compatibility and logging.
 
 ## Development
 

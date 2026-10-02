@@ -67,5 +67,6 @@ python -m pytest tests/integration -v --timeout=45 --timeout-method=thread
 
 The older `python3 tests/legacy/client_smoke.py <ZOOKEEPER_HOSTS> <SERVICE_CODE>` script remains a
 separate manual integration entry point. It uses fixed keys and should only be
-run against an isolated service. This suite adapts its basic cases into fixtures
-with bounded result waits and independent test keys.
+run against an isolated service. Importing the script also starts it; default
+test discovery excludes `tests/legacy/`. This suite adapts its basic cases into
+fixtures with bounded result waits and independent test keys.
