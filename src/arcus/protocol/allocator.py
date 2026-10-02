@@ -22,21 +22,70 @@ import queue
 import threading
 
 from ..exceptions import ArcusNodeConnectionException
+from .connection import _positive_timeout
 from .node import ArcusMCNode
 from .worker import ArcusMCWorker
 
 
 class ArcusMCNodeAllocator:
-    def __init__(self, transcoder):
+    def __init__(
+        self, transcoder, *, connect_timeout=1.0, io_timeout=1.0, operation_timeout=5.0
+    ):
         self.transcoder = transcoder
-        self.worker = ArcusMCWorker(self)
-        self.worker.start()
-        self.shutdown = False
+        self.connect_timeout = _positive_timeout(connect_timeout)
+        self.io_timeout = _positive_timeout(io_timeout)
+        self.operation_timeout = _positive_timeout(operation_timeout)
+        self._nodes = set()
+        self._lock = threading.RLock()
+        self.shutdown = True
+        self.worker = None
+        self.start()
+
+    def start(self):
+        with self._lock:
+            if not self.shutdown:
+                return
+            self.shutdown = False
+            self.worker = ArcusMCWorker(self)
+            self.worker.start()
 
     def alloc(self, addr, name):
-        ret = ArcusMCNode(addr, name, self.transcoder, self)
-        self.worker.register_node(ret)
-        return ret
+        with self._lock:
+            if self.shutdown:
+                raise ArcusNodeConnectionException("allocator is closed")
+            node = ArcusMCNode(addr, name, self.transcoder, self)
+            self._nodes.add(node)
+            self.worker.register_node(node)
+            return node
+
+    def snapshot_nodes(self):
+        with self._lock:
+            return tuple(self._nodes)
+
+    def forget(self, node):
+        with self._lock:
+            self._nodes.discard(node)
+
+    def close(self):
+        with self._lock:
+            self.shutdown = True
+            nodes = tuple(self._nodes)
+            self._nodes.clear()
+            worker = self.worker
+        for node in nodes:
+            with node._io_lock:
+                node._closed = True
+                node.disconnect()
+        if worker is not None:
+            worker.q.put(None)
+            if threading.current_thread() is not worker:
+                worker.join()
+            while True:
+                try:
+                    worker.q.get_nowait()
+                except queue.Empty:
+                    break
 
     def join(self):
-        self.worker.join()
+        if self.worker is not None:
+            self.worker.join()

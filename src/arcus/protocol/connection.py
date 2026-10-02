@@ -23,15 +23,21 @@ import socket
 import time
 
 from .._logging import arcuslog
-from ..exceptions import (
-    ArcusNodeConnectionException,
-    ArcusNodeSocketException,
-    ArcusProtocolException,
-)
+from ..exceptions import ArcusNodeConnectionException, ArcusProtocolException
+
+
+def _positive_timeout(value):
+    value = float(value)
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("timeouts must be finite and greater than zero")
+    return value
 
 
 class Connection(object):
-    def __init__(self, host):
+    def __init__(self, host, *, connect_timeout=1.0, io_timeout=1.0):
+        self.connect_timeout = _positive_timeout(connect_timeout)
+        self.io_timeout = _positive_timeout(io_timeout)
+        self.deadline = None
         ip, port = host.split(":")
         self.ip = ip
         self.port = int(port)
@@ -43,12 +49,19 @@ class Connection(object):
         self.connect()
 
     def connect(self):
-        if self.socket:
-            disconnect()
+        if self.socket is not None:
+            self.disconnect()
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
+            timeout = self.connect_timeout
+            if self.deadline is not None:
+                timeout = min(timeout, self.deadline - time.monotonic())
+                if timeout <= 0:
+                    raise socket.timeout("operation deadline exceeded before connect")
+            self.socket.settimeout(timeout)
             self.socket.connect(self.address)
+            self.socket.settimeout(self.io_timeout)
         except socket.timeout as msg:
             self.disconnect()
         except socket.error as msg:
@@ -58,16 +71,30 @@ class Connection(object):
         return self.socket
 
     def disconnect(self):
-        if self.socket:
-            self.socket.close()
-            self.socket = None
+        sock = self.socket
+        self.socket = None
+        self.buffer = b""
+        if sock is not None:
+            sock.close()
 
     def disconnected(self):
         return self.socket == None
 
     def send_request(self, request):
+        if self.disconnected():
+            raise ArcusNodeConnectionException("node is disconnected")
         arcuslog(self, "send_request: ", request + b"\r\n")
+        self._set_io_timeout()
         self.socket.sendall(request + b"\r\n")
+
+    def _set_io_timeout(self):
+        timeout = self.io_timeout
+        if self.deadline is not None:
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise socket.timeout("operation deadline exceeded")
+            timeout = min(timeout, remaining)
+        self.socket.settimeout(timeout)
 
     def hasline(self):
         index = self.buffer.find(b"\r\n")
@@ -81,10 +108,13 @@ class Connection(object):
             if index >= 0:
                 break
 
+            if self.disconnected():
+                raise ArcusNodeConnectionException("node is disconnected")
+            self._set_io_timeout()
             data = self.socket.recv(4096)
             arcuslog(self, 'sock recv: (%d): "' % len(data), data)
 
-            if data == None:
+            if data == b"":
                 self.disconnect()
                 raise ArcusNodeConnectionException("connection lost")
 
@@ -96,13 +126,19 @@ class Connection(object):
         return buf[:index]
 
     def recv(self, rlen):
+        if rlen < 0:
+            raise ArcusProtocolException("invalid response length: %d" % rlen)
         buf = self.buffer
         while len(buf) < rlen:
+            if self.disconnected():
+                raise ArcusNodeConnectionException("node is disconnected")
+            self._set_io_timeout()
             foo = self.socket.recv(max(rlen - len(buf), 4096))
 
-            if foo == None:
-                raise ArcusNodeSocketException(
-                    "Read %d bytes, expecting %d, read returned 0 length bytes"
+            if foo == b"":
+                self.disconnect()
+                raise ArcusNodeConnectionException(
+                    "connection lost after reading %d bytes, expecting %d"
                     % (len(buf), rlen)
                 )
 

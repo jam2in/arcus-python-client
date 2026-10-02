@@ -25,8 +25,9 @@ Or install a wheel produced by the build instructions below:
 python -m pip install dist/arcus_python_client-1.0.0-py3-none-any.whl
 ```
 
-The distribution contains the `arcus` package and `arcus_mc_node` compatibility
-module. Existing imports remain valid. Creating a wheel does not publish a release to a package index.
+The distribution contains the `arcus` package and a small `arcus_mc_node`
+compatibility module. Existing imports remain valid. Creating a wheel does not
+publish a release to a package index.
 
 ## Project structure
 
@@ -63,22 +64,42 @@ development, before running it from a checkout.
 Run this example against a dedicated test service:
 
 ```python
-from arcus import Arcus, ArcusLocator, ArcusTranscoder
-from arcus_mc_node import ArcusMCNodeAllocator
+from arcus import Arcus, ArcusLocator, ArcusMCNodeAllocator, ArcusTranscoder
 
-client = Arcus(ArcusLocator(ArcusMCNodeAllocator(ArcusTranscoder())))
+allocator = ArcusMCNodeAllocator(
+    ArcusTranscoder(), connect_timeout=1, io_timeout=1, operation_timeout=5
+)
+client = Arcus(ArcusLocator(allocator))
 client.connect("localhost:2181", "test")
 try:
-    client.set("example:key", "hello", exptime=60).get_result()
-    assert client.get("example:key").get_result() == "hello"
+    client.set("example:key", "hello", exptime=60).get_result(timeout=5)
+    assert client.get("example:key").get_result(timeout=5) == "hello"
 finally:
     client.disconnect()
 ```
 
 `exptime` is the cache item's expiration time. It is separate from socket timeouts
 and the timeout accepted by an operation's `get_result()` method.
+`get_result(timeout=5)` limits that caller's wait to five seconds and raises
+`queue.Empty` when the result is not ready. It does not cancel the operation;
+calling `get_result()` again can retrieve a later result. The default `timeout=0`
+waits for the operation's eventual result. Connection invalidation raises
+`ArcusNodeConnectionException` instead of returning a cache miss.
 
-The legacy `tests/legacy/client_smoke.py` script exercises basic operations against a live service:
+The allocator defaults are a one-second connection timeout, a one-second socket
+I/O timeout, and a five-second operation deadline measured from submission. All
+three must be finite and positive. Socket and operation timeouts raise
+`TimeoutError`; a failed connection can also invalidate other pending operations.
+The poller checks silent connections periodically. Because response parsing uses
+blocking I/O, another node can delay deadline detection; these limits do not
+constitute a strict end-to-end latency guarantee under arbitrary load.
+
+Failed or partially sent requests are not automatically replayed. `noreply`
+operations finish after the write succeeds, which does not confirm server-side
+execution. `disconnect()` releases nodes, workers, epoll and ZooKeeper resources;
+the same client can connect again after disconnecting.
+
+The legacy smoke script exercises basic operations against a live service:
 
 ```sh
 python tests/legacy/client_smoke.py <ZOOKEEPER_HOSTS> <SERVICE_CODE>
@@ -108,11 +129,29 @@ ruff format --check .
 Run the unit tests without Arcus or ZooKeeper:
 
 ```sh
-python -m pytest
+python -m pytest --timeout=30
 ```
 
-Integration tests under `tests/integration/` are excluded from default discovery
-and must be selected explicitly after provisioning their services.
+Run the Linux integration suite using Docker Engine and Docker Compose v2:
+
+```sh
+./scripts/test-integration.sh
+```
+
+The script creates an isolated ZooKeeper service and two Arcus nodes, builds and
+installs the wheel in a Linux container, and tests basic APIs and concurrent
+requests. It saves results under `build/integration/` and removes its test stack.
+See [the integration guide](tests/integration/README.md) for versions, limits,
+cleanup, and commands. Integration tests are excluded from default discovery.
+
+GitHub Actions separates unit tests on Python 3.11–3.14, formatting and package
+checks, and the Docker integration suite. The unit job runs outside the checkout
+against the installed package.
+
+See [the validation scope](docs/validation.md) for test assumptions and acceptance
+criteria. Full failure recovery, serialization edge cases, and sustained-load
+behavior require separate experiments before production deployment. Compression
+and custom-object serialization remain outside the validated data formats.
 
 ## Building distributions
 
@@ -134,9 +173,8 @@ or PyPI is a separate release step requiring the selected index and credentials.
 
 ## Administration utilities
 
-The standalone administration scripts remain available in the source repository.
-They are kept under `tools/` and are not installed as part of the client package.
-Their dependencies include
+The standalone administration scripts remain available under [tools/](tools/README.md).
+They are not installed as part of the client package. Their dependencies include
 `scramp` and, for `arcus_cmd.py`, `paramiko`, in addition to Kazoo. The utilities
 using `arcus_util.py` currently require Python 3.11 or 3.12 because they import
 `telnetlib`, which was removed from Python 3.13. This limitation does not apply

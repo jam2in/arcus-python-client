@@ -106,17 +106,12 @@ class ArcusTranscoder:
             or flags == self.FLAG_LONG
             or flags == self.FLAG_BYTE
         ):
-            val = 0
-            l = len(buf)
-            for i in range(0, l):
-                val = val + (buf[i] << (8 * (l - i - 1)))
+            width = {self.FLAG_INTEGER: 4, self.FLAG_LONG: 8, self.FLAG_BYTE: 1}[flags]
+            # Java omits leading zero bytes from positive integers only.
+            val = int.from_bytes(buf, "big", signed=len(buf) == width)
 
         elif flags == self.FLAG_DATE:
-            val = 0
-            l = len(buf)
-            for i in range(0, l):
-                val = val + (buf[i] << (8 * (l - i - 1)))
-
+            val = int.from_bytes(buf, "big", signed=len(buf) == 8)
             val = datetime.datetime.fromtimestamp(val / 1000.0)
 
         elif flags == self.FLAG_FLOAT:

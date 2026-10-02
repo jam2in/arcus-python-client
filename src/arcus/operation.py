@@ -30,9 +30,10 @@ class ArcusOperation:
         self.node = node
         self.request = request
         self.callback = callback
-        self.q = queue.Queue(1)
         self.result = self  # self.result == self : not received, self.result == None : receive None
         self.invalid = False
+        self._result_lock = Lock()
+        self._result_ready = Event()
 
         self.noreply = False
         self.pipe = False
@@ -40,42 +41,39 @@ class ArcusOperation:
     def __repr__(self):
         return "<ArcusOperation[%s] result: %s>" % (
             hex(id(self)),
-            repr(self.get_result()),
+            repr(self.result) if self.has_result() else "pending",
         )
 
     def has_result(self):
-        return self.result != None or self.q.empty() == False
+        return self._result_ready.is_set()
 
     def set_result(self, result):
-        self.q.put(result)
+        with self._result_lock:
+            if not self._result_ready.is_set():
+                self.result = result
+                self._result_ready.set()
 
     def set_invalid(self):
-        if self.has_result():
-            return False
+        with self._result_lock:
+            if self._result_ready.is_set():
+                return False
 
-        self.invalid = True
-        self.q.put(None)  # wake up blocked callers.
-        return True
-
-    def get_result(self, timeout=0):
-        if self.result != self:
-            return self.result
-
-        if timeout > 0:
-            result = self.q.get(False, timeout)
-        else:
-            result = self.q.get()
-
-        if result == self and self.invalid == True:
-            raise ArcusNodeConnectionException(
+            self.invalid = True
+            self.result = ArcusNodeConnectionException(
                 "current async result is unavailable because Arcus node is disconnected now"
             )
+            self._result_ready.set()
+            return True
 
-        if isinstance(result, Exception):
-            raise result
+    def get_result(self, timeout=0):
+        wait_timeout = timeout if timeout > 0 else None
+        if not self._result_ready.wait(wait_timeout):
+            raise queue.Empty()
 
-        self.result = result
-        return result
+        if isinstance(self.result, Exception):
+            raise self.result
+
+        return self.result
 
 
 class ArcusOperationList:
@@ -85,76 +83,91 @@ class ArcusOperationList:
         self.result = None
         self.missed_key = None
         self.invalid = False
+        self._result_lock = Lock()
+        self._result_error = None
 
         self.noreply = False
         self.pipe = False
 
     def __repr__(self):
+        with self._result_lock:
+            result = self._result_error or self.result
         return "<ArcusOperationList[%s] result: %s>" % (
             hex(id(self)),
-            repr(self.get_result()),
+            repr(result) if result is not None else "pending",
         )
 
     def add_op(self, op):
-        self.ops.append(op)
+        with self._result_lock:
+            self.ops.append(op)
 
     def has_result(self):
-        if self.result != None:
-            return True
-
-        for a in ops:
-            if a.has_result() == False:
-                return False
-
-        return True
+        with self._result_lock:
+            if self.result is not None or self._result_error is not None:
+                return True
+            return all(op.has_result() for op in self.ops)
 
     def set_result(self, result):
         assert False
         pass
 
     def set_invalidate(self):
-        if self.has_result():
-            return False  # already done
+        with self._result_lock:
+            if (
+                self.result is not None
+                or self._result_error is not None
+                or all(op.has_result() for op in self.ops)
+            ):
+                return False  # already done
 
-        self.invalid = True
-
-        # invalidate all ops and wake up blockers.
-        for a in ops:
-            a.set_invalidate()
-
-        return True
+            self.invalid = True
+            self._result_error = ArcusNodeConnectionException(
+                "current async result is unavailable because Arcus node is disconnected now"
+            )
+            for op in self.ops:
+                op.set_invalid()
+            return True
 
     def get_missed_key(self, timeout=0):
-        if self.missed_key != None:
-            return self.missed_key
-
         self.get_result(timeout)
         return self.missed_key
 
     def get_result(self, timeout=0):
-        if self.result != None:
-            return self.result
+        with self._result_lock:
+            if self._result_error is not None:
+                raise self._result_error
+            if self.result is not None:
+                return self.result
+            ops = list(self.ops)
 
+        deadline = time.monotonic() + timeout if timeout > 0 else None
         tmp_result = []
         missed_key = []
-        if timeout > 0:
-            start_time = time.time()
-            end_time = start_tume + timeout
-
-            for a in self.ops:
-                curr_time = time.time()
-                remain_time = end_time - curr_time
-                if remain_time < 0:
-                    raise Queue.Empty()
-
-                ret, miss = a.get_result(remain_time)
+        try:
+            for op in ops:
+                if deadline is None:
+                    ret, miss = op.get_result()
+                else:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        if not op.has_result():
+                            raise queue.Empty()
+                        ret, miss = op.get_result()
+                    else:
+                        ret, miss = op.get_result(remaining)
                 tmp_result.append(ret)
                 missed_key += miss
-        else:
-            for a in self.ops:
-                ret, miss = a.get_result()
-                tmp_result.append(ret)
-                missed_key += miss
+        except queue.Empty:
+            with self._result_lock:
+                if self._result_error is not None:
+                    raise self._result_error
+            raise
+        except Exception as error:
+            with self._result_lock:
+                if self._result_error is None:
+                    self._result_error = error
+                error = self._result_error
+            raise error
 
         if self.cmd == "bop mget":
             result = {}
@@ -162,42 +175,20 @@ class ArcusOperationList:
                 result.update(a)
 
         else:  # bop smget
-            length = len(tmp_result)
-
-            # empty
-            if length <= 0:
-                return []
-
-            # merge sort
+            # Copy child results so concurrent readers and later reads retain them.
+            pending = [list(values) for values in tmp_result if values]
             result = []
-            while True:
-                # remove empty list
-                while len(tmp_result[0]) == 0:
-                    tmp_result.pop(0)
-                    if len(tmp_result) == 0:  # all done
-                        if self.result == None and self.invalid == True:
-                            raise ArcusNodeConnectionException(
-                                "current async result is unavailable because Arcus node is disconnected now"
-                            )
-                        missed_key.sort()
-                        self.result = result
-                        self.missed_key = missed_key
-                        return self.result
+            while pending:
+                idx = min(range(len(pending)), key=lambda i: pending[i][0])
+                result.append(pending[idx].pop(0))
+                if not pending[idx]:
+                    pending.pop(idx)
 
-                min = tmp_result[0][0]
-                idx = 0
-                for i in range(0, len(tmp_result)):
-                    if len(tmp_result[i]) and tmp_result[i][0] < min:
-                        min = tmp_result[i][0]
-                        idx = i
-
-                result.append(tmp_result[idx].pop(0))
-
-        if self.result == None and self.invalid == True:
-            raise ArcusNodeConnectionException(
-                "current async result is unavailable because Arcus node is disconnected now"
-            )
         missed_key.sort()
-        self.result = result
-        self.missed_key = missed_key
-        return self.result
+        with self._result_lock:
+            if self._result_error is not None:
+                raise self._result_error
+            if self.result is None:
+                self.result = result
+                self.missed_key = missed_key
+            return self.result

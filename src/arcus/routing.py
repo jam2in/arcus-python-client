@@ -20,12 +20,26 @@
 
 import bisect
 import hashlib
+import time
 from threading import Lock
 
-from kazoo.client import KazooClient
+from kazoo.client import KazooClient, KazooState
+from kazoo.protocol.states import EventType
 
 from ._logging import arcuslog
 from .exceptions import ArcusNodeConnectionException, ArcusProtocolException
+
+
+# Match Kazoo's start() default, sharing it across connection and discovery reads.
+# Cache socket timeouts and operation deadlines are configured by the allocator.
+ZOOKEEPER_CONNECT_TIMEOUT = 15.0
+
+
+def _remaining_connect_timeout(deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("ZooKeeper connection setup deadline exceeded")
+    return remaining
 
 
 class ArcusKetemaHash:
@@ -88,108 +102,205 @@ class ArcusPoint:
 
 class ArcusLocator:
     def __init__(self, node_allocator):
-        # config
         self.hash_method = ArcusKetemaHash()
-
-        # init
         self.lock = Lock()
+        self._lifecycle_lock = Lock()
         self.node_list = []
         self.addr_node_map = {}
         self.node_allocator = node_allocator
+        self.zk = None
+        self._closed = False
+        self._generation = 0
+        self._refresh_requested = 0
+        self._refresh_applied = 0
 
     def connect(self, addr, code):
-        # init zookeeper
-        arcuslog(self, "zoo keeper init")
-        self.zk = KazooClient(hosts=addr)
-        self.zk.start()
-
-        self.zoo_path = "/arcus/cache_list/" + code
-        arcuslog(self, "zoo keeper get path: " + self.zoo_path)
-        data, stat = self.zk.get(self.zoo_path)
-        arcuslog(self, "zoo keeper node info with stat: ", data, stat)
-
-        children = self.zk.get_children(self.zoo_path, watch=self.watch_children)
-        self.hash_nodes(children)
+        with self._lifecycle_lock:
+            if self.zk is not None:
+                self._disconnect()
+            try:
+                self.node_allocator.start()
+                zk = KazooClient(hosts=addr)
+                with self.lock:
+                    self.zk = zk
+                    self.zoo_path = "/arcus/cache_list/" + code
+                    self._closed = False
+                    self._generation += 1
+                    generation = self._generation
+                    self._watch = self._child_watch(zk, generation)
+                zk.add_listener(
+                    lambda state: self._state_changed(zk, generation, state)
+                )
+                deadline = time.monotonic() + ZOOKEEPER_CONNECT_TIMEOUT
+                zk.start(timeout=_remaining_connect_timeout(deadline))
+                data, stat = zk.get_async(self.zoo_path).get(
+                    timeout=_remaining_connect_timeout(deadline)
+                )
+                arcuslog(self, "zoo keeper node info with stat: ", data, stat)
+                # ZooKeeper requests may wait for reconnection. They must never
+                # hold the routing lock needed by ordinary cache operations.
+                with self.lock:
+                    self._refresh_requested += 1
+                    request_id = self._refresh_requested
+                children = zk.get_children_async(self.zoo_path, watch=self._watch).get(
+                    timeout=_remaining_connect_timeout(deadline)
+                )
+                self._apply_children(zk, generation, request_id, children)
+            except BaseException:
+                try:
+                    self._disconnect()
+                except Exception as error:
+                    arcuslog(self, "connection cleanup failed: ", error)
+                raise
 
     def disconnect(self):
-        for node in self.addr_node_map.values():
-            node.disconnect_all()
+        with self._lifecycle_lock:
+            self._disconnect()
 
-        self.addr_node_map = {}
-        self.node_list = []
-        self.zk.stop()
-        self.node_allocator.join()
+    def _disconnect(self):
+        with self.lock:
+            self._closed = True
+            self._generation += 1
+            nodes = list(self.addr_node_map.values())
+            self.addr_node_map = {}
+            self.node_list = []
+            zk, self.zk = self.zk, None
+
+        # Do not hold the routing lock while waiting for ZooKeeper callbacks to stop.
+        cleanup = [node.close for node in nodes]
+        if zk is not None:
+            cleanup.extend([zk.stop, zk.close])
+        cleanup.append(self.node_allocator.close)
+        first_error = None
+        for close in cleanup:
+            try:
+                close()
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error
 
     def hash_nodes(self, children):
-        # print ('hash_nodes with children %d' % len(children))
+        with self.lock:
+            if not self._closed:
+                self._hash_nodes(children)
+
+    def _hash_nodes(self, children):
+        """Build a replacement ring under self.lock before publishing it."""
         arcuslog(self, "hash_nodes with children: ", children)
+        nodes = {}
+        points = []
+        allocated = []
+        try:
+            for child in children:
+                addr, separator, name = child.partition("-")
+                if not separator or not addr or not name:
+                    raise ArcusProtocolException("invalid cache node: %s" % child)
+                if addr in nodes:
+                    continue
+                node = self.addr_node_map.get(addr)
+                if node is None:
+                    node = self.node_allocator.alloc(addr, name)
+                    allocated.append(node)
+                nodes[addr] = node
+                points.extend(
+                    ArcusPoint(value, node)
+                    for value in self.hash_method.hash(node.addr)
+                )
+            points.sort()
+        except BaseException:
+            for node in allocated:
+                try:
+                    node.close()
+                except Exception as error:
+                    arcuslog(self, "allocation cleanup failed: ", error)
+            raise
 
-        self.lock.acquire()
-
-        # clear first
-        self.node_list = []
-        for node in self.addr_node_map.values():
+        removed = [
+            node for addr, node in self.addr_node_map.items() if addr not in nodes
+        ]
+        self.addr_node_map = nodes
+        self.node_list = points
+        for node in nodes.values():
+            node.in_use = True
+        first_error = None
+        for node in removed:
             node.in_use = False
+            try:
+                node.close()
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error
 
-        # update live nodes
-        for child in children:
-            lst = child.split("-")
-            addr, name = lst[:2]
+    def _child_watch(self, zk, generation):
+        return lambda event: self._watch_children(zk, generation, event)
 
-            if addr in self.addr_node_map:
-                self.addr_node_map[addr].in_use = True
-                node = self.addr_node_map[addr]
-            else:
-                # new node
-                node = self.node_allocator.alloc(addr, name)
-                self.addr_node_map[addr] = node
-                self.addr_node_map[addr].in_use = True
+    def _watch_children(self, zk, generation, event):
+        if getattr(event, "type", None) == EventType.NONE:
+            # Kazoo clears one-shot watches when the connection is suspended.
+            # CONNECTED below will refresh the snapshot and reinstall the watch.
+            return
+        self._refresh_children(zk, generation)
 
-            hash_list = self.hash_method.hash(node.addr)
-            arcuslog(self, "hash_lists of node(%s): %s" % (node.addr, hash_list))
+    def _state_changed(self, zk, generation, state):
+        if state == KazooState.CONNECTED:
+            self._refresh_children(zk, generation)
 
-            for hash in hash_list:
-                point = ArcusPoint(hash, node)
-                self.node_list.append(point)
+    def _refresh_children(self, zk, generation):
+        with self.lock:
+            if self._closed or self.zk is not zk or self._generation != generation:
+                return
+            self._refresh_requested += 1
+            request_id = self._refresh_requested
+            path, watch = self.zoo_path, self._watch
+        # State listeners run on Kazoo's connection thread, so use only its
+        # asynchronous API here. Completion callbacks run on Kazoo's handler.
+        try:
+            result = zk.get_children_async(path, watch=watch)
+            result.rawlink(
+                lambda result: self._refresh_complete(
+                    zk, generation, request_id, result
+                )
+            )
+        except Exception as error:
+            arcuslog(self, "discovery refresh failed: ", error)
 
-        # sort list
-        self.node_list.sort()
-        arcuslog(self, "sorted node list", self.node_list)
+    def _refresh_complete(self, zk, generation, request_id, result):
+        try:
+            children = result.get()
+            self._apply_children(zk, generation, request_id, children)
+        except Exception as error:
+            arcuslog(self, "discovery refresh failed: ", error)
 
-        # disconnect dead node
-        dead_list = []
-        for addr, node in self.addr_node_map.items():
-            if node.in_use == False:
-                dead_list.append(node)
-
-        for node in dead_list:
-            arcuslog(self, "disconnect node(%s)" % node.addr)
-            node.disconnect()
-            del self.addr_node_map[node.addr]
-
-        self.lock.release()
+    def _apply_children(self, zk, generation, request_id, children):
+        with self.lock:
+            if (
+                self._closed
+                or self.zk is not zk
+                or self._generation != generation
+                or request_id <= self._refresh_applied
+            ):
+                return
+            self._hash_nodes(children)
+            self._refresh_applied = request_id
 
     def watch_children(self, event):
-        arcuslog(self, "watch children called: ", event)
-
-        # rehashing
-        children = self.zk.get_children(event.path, watch=self.watch_children)
-        self.hash_nodes(children)
+        with self.lock:
+            zk, generation = self.zk, self._generation
+        self._watch_children(zk, generation, event)
 
     def get_node(self, key):
         hash = self.__hash_key(key)
-
-        self.lock.acquire()
-        idx = bisect.bisect(self.node_list, ArcusPoint(hash, None))
-
-        # roll over
-        if idx >= len(self.node_list):
-            idx = 0
-
-        point = self.node_list[idx]
-        self.lock.release()
-
-        return point.node
+        with self.lock:
+            if not self.node_list:
+                raise ArcusNodeConnectionException("no available cache nodes")
+            idx = bisect.bisect(self.node_list, ArcusPoint(hash, None))
+            if idx >= len(self.node_list):
+                idx = 0
+            return self.node_list[idx].node
 
     def __hash_key(self, key):
         bkey = bytes(key, "utf-8")

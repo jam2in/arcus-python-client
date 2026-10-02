@@ -50,11 +50,18 @@ class ArcusMCNode:
         self.in_use = False
         self.transcoder = transcoder
 
-        self.handle = Connection(addr)
+        self.node_allocator = node_allocator
+        self.handle = Connection(
+            addr,
+            connect_timeout=getattr(node_allocator, "connect_timeout", 1.0),
+            io_timeout=getattr(node_allocator, "io_timeout", 1.0),
+        )
         self.ops = []
         self.lock = Lock()  # for ordering worker.q and ops
-
-        self.node_allocator = node_allocator
+        self._io_lock = threading.RLock()
+        self._generation = 0
+        self._pending = set()
+        self._closed = False
 
     def __repr__(self):
         return "%s-%s" % (self.addr, self.name)
@@ -63,29 +70,81 @@ class ArcusMCNode:
         return self.handle.socket.fileno()
 
     def disconnect(self):
-        # disconnect socket
-        self.handle.disconnect()
+        with self._io_lock:
+            self.node_allocator.worker.poll.unregister_node(self)
+            self.handle.disconnect()
+            with self.lock:
+                self._generation += 1
+                ops = list(self._pending | set(self.ops))
+                self._pending.clear()
+                self.ops = []
+            for op in ops:
+                op.set_invalid()
 
-        # clear existing operation
-        for op in self.ops:
-            op.set_invalid()
-
-        self.ops = []
-
-    def disconnect_all(self):  # shutdown
-        self.node_allocator.shutdown = True
+    def _fail_operation(self, op, error):
+        # Keep the original error, but finish teardown before waking its waiter.
+        with self.lock:
+            self._pending.discard(op)
+            if op in self.ops:
+                self.ops.remove(op)
         self.disconnect()
+        op.set_result(error)
 
-        self.node_allocator.worker.q.put(None)
+    def close(self):
+        with self._io_lock:
+            self._closed = True
+            self.disconnect()
+        self.node_allocator.forget(self)
+
+    def disconnect_all(self):
+        self.node_allocator.close()
 
     def process_request(self, request):
         if self.handle.disconnected():
             ret = self.handle.connect()
-            if ret != None:
-                # re-register if node connection is available
+            if ret is not None:
                 self.node_allocator.worker.register_node(self)
-
         self.handle.send_request(request)
+
+    def process_operation(self, op):
+        # Serialize disconnect with the last validity check and the entire write.
+        # Failed or partial writes are never replayed on a replacement connection.
+        with self._io_lock:
+            if (
+                self._closed
+                or self.node_allocator.shutdown
+                or op.invalid
+                or op.generation != self._generation
+            ):
+                op.set_invalid()
+                return
+            try:
+                if time.monotonic() >= op.deadline:
+                    raise socket.timeout("operation deadline exceeded before send")
+                self.handle.deadline = op.deadline
+                self.process_request(op.request)
+            except Exception as error:
+                self._fail_operation(op, error)
+                return
+            finally:
+                self.handle.deadline = None
+            if op.noreply:
+                with self.lock:
+                    self._pending.discard(op)
+                op.set_result(True)
+
+    def expire_operations(self):
+        with self._io_lock:
+            with self.lock:
+                expired = any(op.deadline <= time.monotonic() for op in self._pending)
+            if expired:
+                with self.lock:
+                    ops = list(self._pending)
+                    self._pending.clear()
+                    self.ops = []
+                self.disconnect()
+                for op in ops:
+                    op.set_result(socket.timeout("operation deadline exceeded"))
 
     ##########################################################################################
     ### commands
@@ -100,7 +159,7 @@ class ArcusMCNode:
         return self._set("set", key, val, exptime)
 
     def cas(self, key, val, cas_id, exptime=0):
-        return self._cas(key, "cas", val, cas_id, exptime)
+        return self._cas("cas", key, val, cas_id, exptime)
 
     def incr(self, key, value=1):
         return self._incr_decr("incr", key, value)
@@ -323,15 +382,20 @@ class ArcusMCNode:
             "add operation %s(%s:%s) to %s" % (full_cmd, callback, hex(id(op)), self),
         )
 
-        if noreply:  # or pipe
-            # don't need to receive response, set_result now
-            self.node_allocator.worker.q.put(op)
-            op.set_result(True)
-        else:
-            self.lock.acquire()
-            self.node_allocator.worker.q.put(op)
-            self.ops.append(op)
-            self.lock.release()
+        with self._io_lock:
+            with self.lock:
+                if self._closed or self.node_allocator.shutdown:
+                    op.set_invalid()
+                    return op
+                op.generation = self._generation
+                op.deadline = time.monotonic() + getattr(
+                    self.node_allocator, "operation_timeout", 5.0
+                )
+                op.noreply = noreply
+                self._pending.add(op)
+                if not noreply:
+                    self.ops.append(op)
+                self.node_allocator.worker.q.put(op)
 
         return op
 
@@ -364,7 +428,8 @@ class ArcusMCNode:
             return 0
 
         full_cmd = bytes(
-            "%s %s %d %d %d %d\r\n" % (cmd, key, flags, exptime, len, cas_id), "utf-8"
+            "%s %s %d %d %d %d\r\n" % (cmd, key, flags, exptime, len, int(cas_id)),
+            "utf-8",
         )
         full_cmd += value
 
@@ -581,35 +646,38 @@ class ArcusMCNode:
     ### recievers
     ##########################################################################################
     def do_op(self):
-        self.lock.acquire()
-        if len(self.ops) <= 0:
-            arcuslog("ops empty (%s)" % self.addr)
-            self.lock.release()
-            return
+        with self._io_lock:
+            while True:
+                with self.lock:
+                    op = self.ops.pop(0) if self.ops else None
 
-        op = self.ops.pop(0)
-        self.lock.release()
+                if op is None:
+                    # Readiness without a response slot is EOF or unsolicited data.
+                    self.disconnect()
+                    return
 
-        try:
-            ret = op.callback()
-        except Exception as e:
-            arcuslog("do op failed: %s" % str(e))
-            ret = e
+                try:
+                    self.handle.deadline = op.deadline
+                    ret = op.callback()
+                except (
+                    ArcusNodeConnectionException,
+                    ArcusNodeSocketException,
+                    ArcusProtocolException,
+                    OSError,
+                ) as error:
+                    self._fail_operation(op, error)
+                    return
+                except Exception as error:
+                    arcuslog(self, "do op failed: %s" % str(error))
+                    ret = error
+                finally:
+                    self.handle.deadline = None
 
-        op.set_result(ret)
-
-        while self.handle.hasline():  # remaining jobs
-            self.lock.acquire()
-            op = self.ops.pop(0)
-            self.lock.release()
-
-            try:
-                ret = op.callback()
-            except Exception as e:
-                arcuslog("do op failed: %s" % str(e))
-                ret = e
-
-            op.set_result(ret)
+                with self.lock:
+                    self._pending.discard(op)
+                op.set_result(ret)
+                if not self.handle.hasline():
+                    return
 
     def _recv_ok(self):
         line = self.handle.readline()
@@ -696,25 +764,41 @@ class ArcusMCNode:
         return False
 
     def _recv_cas_value(self):
-        line = self.handle.readline()
-        if line[:5] != b"VALUE":
+        fields = self._recv_value_header(5)
+        if fields is None:
             return None
 
-        resp, rkey, flags, len, cas_id = line.split()
-        flags = int(flags)
-        rlen = int(len)
-        val = self._decode_value(flags, rlen)
-        return (val, cas_id)
+        val = self._decode_value(fields[0], fields[1])
+        return (val, fields[2])
 
     def _recv_value(self):
-        line = self.handle.readline()
-        if line[:5] != b"VALUE":
+        fields = self._recv_value_header(4)
+        if fields is None:
             return None
 
-        resp, rkey, flags, len = line.split()
-        flags = int(flags)
-        rlen = int(len)
-        return self._decode_value(flags, rlen)
+        return self._decode_value(fields[0], fields[1])
+
+    def _recv_value_header(self, field_count):
+        line = self.handle.readline()
+        if line == b"END":
+            return None
+
+        fields = line.split()
+        if (
+            len(fields) != field_count
+            or fields[0] != b"VALUE"
+            or not fields[2].isdigit()
+            or not fields[3].isdigit()
+            or (field_count == 5 and not fields[4].isdigit())
+        ):
+            raise ArcusProtocolException("invalid value response header: %r" % line)
+        try:
+            flags, length = int(fields[2]), int(fields[3])
+        except ValueError as e:
+            raise ArcusProtocolException(
+                "invalid value response header: %r" % line
+            ) from e
+        return flags, length, fields[4] if field_count == 5 else None
 
     def _recv_coll_create(self):
         line = self.handle.readline()
@@ -845,6 +929,8 @@ class ArcusMCNode:
     ### decoders
     ##########################################################################################
     def _decode_value(self, flags, rlen):
+        if rlen < 0:
+            raise ArcusProtocolException("invalid response length: %d" % rlen)
         rlen += 2  # include \r\n
         buf = self.handle.recv(rlen)
         if len(buf) != rlen:
@@ -852,10 +938,8 @@ class ArcusMCNode:
                 "received %d bytes when expecting %d" % (len(buf), rlen)
             )
 
-        if len(buf) == rlen:
-            buf = buf[:-2]  # strip \r\n
-
-        val = self.transcoder.decode(flags, buf)
+        if not buf.endswith(b"\r\n"):
+            raise ArcusProtocolException("invalid value payload terminator")
 
         line = self.handle.readline()
         if line != b"END":
@@ -863,7 +947,7 @@ class ArcusMCNode:
                 "invalid response expect END but recv: %s" % line
             )
 
-        return val
+        return self.transcoder.decode(flags, buf[:-2])
 
     def _decode_collection(self, type):
         if type == "bop":
