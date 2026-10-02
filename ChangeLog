@@ -1,2 +1,19 @@
+# Unreleased
+  - Package the core client for Python 3.11+ with pyproject.toml.
+  - Separate client, routing, encoding, results and protocol classes under src/arcus.
+  - Preserve existing imports and move administration utilities under tools/.
+  - Standardize Python formatting and add independent regression tests.
+  - Fix asynchronous result deadlines, repeated reads, and concurrent waiters.
+  - Report invalidated operations as connection errors rather than cache misses.
+  - Detect socket EOF and reject malformed get/gets responses.
+  - Correct CAS arguments and BTree decrement dispatch.
+  - Skip invalidated queued requests to preserve response ordering.
+  - Bound connection, I/O and submitted operation waits with configurable timeouts.
+  - Release node, worker, epoll and ZooKeeper resources on shutdown and failed setup.
+  - Preserve signed integers and dates before the Unix epoch when decoding values.
+  - Refresh ZooKeeper membership without blocking cache routing and bound initial reads.
+  - Add isolated Linux integration tests and Python package CI checks.
+  - Add reproducible client benchmarks and isolated fault/resource experiments.
+
 # 2026-04-20 [version 1.0.0]: naver/arcus-python-client 655e271
   - Includes commits up to naver/arcus-python-client 655e271

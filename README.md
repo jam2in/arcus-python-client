@@ -51,6 +51,8 @@ tests/
   integration/         # Real Arcus and ZooKeeper tests
   legacy/              # Original manual smoke script
 tools/                 # Source-only administration utilities
+benchmarks/            # Client comparisons and profiling
+stability/             # Isolated fault and resource experiments
 docs/                  # Validation scope and acceptance criteria
 ```
 
@@ -98,6 +100,12 @@ Failed or partially sent requests are not automatically replayed. `noreply`
 operations finish after the write succeeds, which does not confirm server-side
 execution. `disconnect()` releases nodes, workers, epoll and ZooKeeper resources;
 the same client can connect again after disconnecting.
+
+Initial ZooKeeper connection and discovery reads share a 15-second wait budget.
+Failure releases the client resources. Cache-node connection and cleanup time are
+additional; this budget is separate from the allocator's cache request limits.
+After reconnecting, discovery refreshes asynchronously so ZooKeeper reads do not
+block routing requests through the known cache-node list.
 
 The legacy smoke script exercises basic operations against a live service:
 
@@ -149,9 +157,11 @@ checks, and the Docker integration suite. The unit job runs outside the checkout
 against the installed package.
 
 See [the validation scope](docs/validation.md) for test assumptions and acceptance
-criteria. Full failure recovery, serialization edge cases, and sustained-load
-behavior require separate experiments before production deployment. Compression
-and custom-object serialization remain outside the validated data formats.
+criteria, [benchmarks](benchmarks/README.md) for client comparisons and profiling,
+and [stability experiments](stability/README.md) for isolated faults and resource
+checks. Short local measurements do not establish production capacity or long-term
+stability. Compression and custom-object serialization remain outside the validated
+data formats; production workloads and acceptance targets still need qualification.
 
 ## Building distributions
 
