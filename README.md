@@ -1,6 +1,6 @@
 # arcus-python-client
 
-A Python client for the [Arcus distributed cache](https://github.com/naver/arcus).
+A Python client for the [Arcus cache](https://github.com/naver/arcus).
 
 ## Requirements
 

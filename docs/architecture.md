@@ -63,20 +63,27 @@ flowchart TD
    applying the operation's remaining read deadline.
 5. The parser uses the reader and transcoder to return a Python value. The node
    completes the operation, waking callers in `get_result()`. Transport/protocol
-   failures close the connection and resolve affected pending operations using
-   the existing error policy.
+   failures close the connection and resolve affected pending operations. A
+   decoding or unexpected parser error also invalidates the connection unless
+   the reader has marked the entire response consumed. Fully consumed domain
+   errors and KV decoding errors can preserve the connection safely.
 
 BTree mget/smget use the same per-node flow. `BTreeAPI` asks the executor to group
-keys by node, submits each group, and returns `ArcusOperationList`. Group order,
-missed-key reporting and result merging retain their existing behavior.
+keys by node, submits each group, and returns `ArcusOperationList`. Multi-node
+smget fetches the first `offset + count` elements from each node, merges in the
+query's direction, and applies the global offset/count once. A single node
+applies its offset on the server. Binary BKeys use bytewise order, with cache keys
+as the tiebreaker in the same direction; element flags and values are not compared.
+Key-list wire lengths count encoded UTF-8 bytes.
 
 ## State ownership and locking
 
 - Commands never access sockets, queues, connection generations or locks.
 - Response objects do not close connections or complete operations. They return
   values or raise errors; the node owns transport recovery and completion.
-- A node reuses its collaborators because parser state is local to each call.
-  Its I/O lock serializes response reading and connection changes.
+- A node reuses its collaborators under its I/O lock, which serializes response
+  reading and connection changes. Response data is local to each call; the reader's
+  completion marker is reset before every parser invocation.
 - Discovery performs only asynchronous refresh requests on Kazoo callbacks.
   It orders snapshots before invoking the membership callback; no blocking
   ZooKeeper request holds the routing lock.
@@ -84,6 +91,9 @@ missed-key reporting and result merging retain their existing behavior.
   releases that lock before closing discovery, preserving one-way lock ordering.
 - The ring publishes a new node set only after allocation succeeds. The locator
   synchronizes ring access and coordinates cleanup after disconnect or setup failure.
+  Once published, retirement errors are logged without undoing the applied snapshot
+  sequence. Failed retired nodes remain tracked by the allocator for shutdown cleanup.
+  Shutdown attempts every node and stops the worker even when a node cleanup fails.
 
 ## Compatibility and limits
 
@@ -106,14 +116,24 @@ their implementations:
   response, consuming all STAT lines and END before the next queued reply.
 - Set deletion separates the payload length from the `drop` option. Successful
   `DELETED_DROPPED` replies now return `True` through the shared deletion parser.
-- Set existence with `pipe=True` no longer refers to an undefined `noreply`
-  variable while constructing its command. This wire-construction correction
-  does not establish complete end-to-end pipeline support.
+- Set existence pipelines now consume the full `RESPONSE` frame. As with existing
+  collection pipelines, operations carrying `pipe=True` report send completion;
+  the final operation without `pipe` returns the ordered list of status strings.
+  An invalid terminator or `PIPE_ERROR` fails the connection and pending requests.
+  Callers must keep a pipeline on one node and prevent unrelated calls from
+  interleaving on that connection; this API does not provide atomic batch isolation.
 
-Other existing protocol limitations remain, including line-oriented collection
-payload parsing and unvalidated compression/custom-object serialization. The
-transport still performs blocking response reads; this separation does not promise
-strict latency bounds under arbitrary load or establish production readiness.
+Collection response handlers read each payload by its byte length, preserving
+embedded CRLF, binary and empty values. Malformed lengths, headers and terminators
+are protocol errors, rather than empty results. An error midway through a collection
+frame preserves the failing operation's exception and invalidates other pending
+operations before the connection can be reused. A complete BTree `BKEY_MISMATCH`
+response raises `CollectionType` and leaves the connection usable. Cached
+`ArcusSet.add()` updates its local set only after acknowledged remote success.
+
+Compression/custom-object serialization remains unvalidated. The transport still
+performs blocking response reads; this separation does not promise strict latency
+bounds under arbitrary load or establish production readiness.
 
 ## Validation
 

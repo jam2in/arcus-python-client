@@ -10,8 +10,8 @@ on macOS validate isolated behavior, not the Linux network path.
 | --- | --- | --- |
 | Runtime | Python 3.11–3.14; Linux containers based on Debian bookworm | Deployment distribution, Python minor version and CPU architecture |
 | Cache service | Arcus 1.16.1, ZooKeeper 3.9.4; two isolated cache nodes for integration | Deployed server versions, replication and topology |
-| Basic APIs | get/set/gets/cas/delete/incr/decr; List, Set and B+Tree operations | Actual API mix, multi-key operations and collection sizes |
-| Values | Strings, bytes, booleans, integers, floats and datetimes | Serialization flags, compression, custom objects and boundary values |
+| Basic APIs | get/set/gets/cas/delete/incr/decr; List, Set, B+Tree, mget/smget and Set existence pipelines | Actual API mix, multi-key workloads and collection sizes |
+| Values | Strings, bytes, booleans, integers, floats, datetimes; CRLF/binary/empty collection values and UTF-8 multi-keys | Serialization flags, compression, custom objects and further boundary values |
 | Concurrency | One shared client, four caller threads, two cache nodes | Processes, threads, connections and outstanding requests |
 | Benchmark candidates | Single-node get hits and set; bytes of 64, 1,024 and 4,096 bytes; one and four callers | Arrival rate, read/write and hit/miss ratios, key distribution |
 | Package distribution | Build and install a wheel and source distribution | PyPI or internal index, publishing credentials and release policy |
@@ -57,6 +57,13 @@ Functional validation passes when expected values and exceptions match, cache
 misses remain distinguishable from connection failures, each response belongs to
 its request, and pending work and resources are released on shutdown. Reproduce
 reported defects before fixing them and retain focused regression tests.
+
+The review regression suite includes integer and binary BKey smget ordering,
+cross-node pagination, single-node offsets and equal-BKey ordering. Socket fakes
+also exercise partial reads, malformed frames, mid-response decoding failures,
+pipeline failures and out-of-order membership callbacks after retirement errors.
+Real-server regressions verify valid wire framing and recovery separately from
+those controlled failure cases.
 
 Performance reports must include successful completions per second, p50/p95/p99
 completion latency, errors, timeouts and unfinished requests. Repeat measurements

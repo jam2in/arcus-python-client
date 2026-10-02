@@ -1,4 +1,11 @@
 # Unreleased
+  - Read collection payloads by byte length and isolate partial parsing failures.
+  - Consume Set existence pipelines and reject failed or malformed pipeline frames.
+  - Apply global smget direction, offset and count across nodes with binary BKey ordering.
+  - Encode BTree multi-key command lengths as UTF-8 byte counts.
+  - Update cached Set values only after successful remote insertion.
+  - Preserve committed membership ordering when retired-node cleanup fails.
+  - Finish pending operations and worker cleanup even when node teardown raises.
   - Compose KV, List, Set and BTree APIs around shared routing and request execution.
   - Separate command construction and response parsing from node transport lifetime.
   - Exchange immutable command requests through a narrow submit interface.
