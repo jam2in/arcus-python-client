@@ -16,101 +16,27 @@
 #
 
 
-import sys
+"""Cache-node state and the Arcus text protocol."""
+
 import socket
-import time
-import os
-import re
 import threading
+import time
 from threading import Lock
-import select
 
-from arcus import *
-
-
-# Some parts of Connection and ArcusMCNode is came from python memcache module
-class Connection(object):
-    def __init__(self, host):
-        ip, port = host.split(":")
-        self.ip = ip
-        self.port = int(port)
-        self.address = (self.ip, self.port)
-
-        self.socket = None
-        self.buffer = b""
-
-        self.connect()
-
-    def connect(self):
-        if self.socket:
-            disconnect()
-
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            self.socket.connect(self.address)
-        except socket.timeout as msg:
-            self.disconnect()
-        except socket.error as msg:
-            self.disconnect()
-
-        self.buffer = b""
-        return self.socket
-
-    def disconnect(self):
-        if self.socket:
-            self.socket.close()
-            self.socket = None
-
-    def disconnected(self):
-        return self.socket == None
-
-    def send_request(self, request):
-        arcuslog(self, "send_request: ", request + b"\r\n")
-        self.socket.sendall(request + b"\r\n")
-
-    def hasline(self):
-        index = self.buffer.find(b"\r\n")
-        return index >= 0
-
-    def readline(self):
-        buf = self.buffer
-
-        while True:
-            index = buf.find(b"\r\n")
-            if index >= 0:
-                break
-
-            data = self.socket.recv(4096)
-            arcuslog(self, 'sock recv: (%d): "' % len(data), data)
-
-            if not data:  # None or b"" (connection closed by peer)
-                self.disconnect()
-                raise ArcusNodeConnectionException("connection lost")
-
-            buf += data
-
-        self.buffer = buf[index + 2 :]
-
-        arcuslog(self, "readline: ", buf[:index])
-        return buf[:index]
-
-    def recv(self, rlen):
-        buf = self.buffer
-        while len(buf) < rlen:
-            foo = self.socket.recv(max(rlen - len(buf), 4096))
-
-            if foo == None:
-                raise ArcusNodeSocketException(
-                    "Read %d bytes, expecting %d, read returned 0 length bytes"
-                    % (len(buf), rlen)
-                )
-
-            buf += foo
-            arcuslog(self, "sock recv: (%d): " % len(foo), foo)
-
-        self.buffer = buf[rlen:]
-        arcuslog(self, "recv: ", buf[:rlen])
-        return buf[:rlen]
+from .._logging import arcuslog
+from ..exceptions import (
+    ArcusNodeConnectionException,
+    ArcusNodeSocketException,
+    ArcusProtocolException,
+    CollectionExist,
+    CollectionHexFormat,
+    CollectionIndex,
+    CollectionOverflow,
+    CollectionType,
+    CollectionUnreadable,
+)
+from ..operation import ArcusOperation
+from .connection import Connection
 
 
 class ArcusMCNode:
@@ -1091,157 +1017,3 @@ class ArcusMCNode:
                 values.append((bkey, key, eflag, val))
 
         return None
-
-
-class EflagFilter:
-    def __init__(self, expr=None):
-        self.lhs_offset = 0
-        self.bit_op = None
-        self.bit_rhs = None
-        self.comp_op = None
-        self.comp_rhs = None
-
-        if expr != None:
-            self._parse(expr)
-
-    def get_expr(self):
-        expr = ""
-        if self.lhs_offset != None:
-            expr += "%d" % self.lhs_offset
-
-            if self.bit_op and self.bit_rhs:
-                expr += " %s %s" % (self.bit_op, self.bit_rhs)
-
-            if self.comp_op and self.comp_rhs:
-                expr += " %s %s" % (self.comp_op, self.comp_rhs)
-
-        return expr
-
-    def _parse(self, expr):
-        re_expr = re.compile(
-            "EFLAG[ ]*(\[[ ]*([0-9]*)[ ]*\:[ ]*\])?[ ]*(([\&\|\^])[ ]*(0x[0-9a-fA-F]+))?[ ]*(==|\!=|<|>|<=|>=)[ ]*(0x[0-9a-fA-F]+)"
-        )
-
-        match = re_expr.match(expr)
-        if match == None:
-            raise FilterInvalid()
-
-        # ( dummy, lhs_offset, dummy, bit_op, bit_rhs, comp_op, comp_rhs )
-        g = match.groups()
-        (
-            dummy_1,
-            self.lhs_offset,
-            dummy_2,
-            self.bit_op,
-            self.bit_rhs,
-            self.comp_op,
-            self.comp_rhs,
-        ) = g
-
-        if self.lhs_offset == None:
-            self.lhs_offset = 0
-        else:
-            self.lhs_offset = int(self.lhs_offset)
-
-        if self.comp_op == "==":
-            self.comp_op = "EQ"
-        elif self.comp_op == "!=":
-            self.comp_op = "NE"
-        elif self.comp_op == "<":
-            self.comp_op = "LT"
-        elif self.comp_op == "<=":
-            self.comp_op = "LE"
-        elif self.comp_op == ">":
-            self.comp_op = "GT"
-        elif self.comp_op == ">=":
-            self.comp_op = "GE"
-
-
-class ArcusMCPoll(threading.Thread):
-    def __init__(self, node_allocator):
-        threading.Thread.__init__(self)
-        self.epoll = select.epoll()
-        self.sock_node_map = {}
-        self.node_allocator = node_allocator
-
-    def run(self):
-        arcuslog(self, "epoll start")
-
-        while True:
-            events = self.epoll.poll(2)
-
-            if self.node_allocator.shutdown == True:
-                arcuslog(self, "epoll out")
-                return
-
-            for fileno, event in events:
-                if event & select.EPOLLIN:
-                    node = self.sock_node_map[fileno]
-                    node.do_op()
-
-                if event & select.EPOLLHUP:
-                    print("EPOLL HUP")
-                    self.epoll.unregister(fileno)
-                    node = self.sock_node_map[fileno]
-                    node.disconnect()
-                    del self.sock_node_map[fileno]
-
-    def register_node(self, node):
-        self.epoll.register(node.get_fileno(), select.EPOLLIN | select.EPOLLHUP)
-
-        arcuslog(self, "regist node: ", node.get_fileno(), node)
-        self.sock_node_map[node.get_fileno()] = node
-
-
-class ArcusMCWorker(threading.Thread):
-    def __init__(self, node_allocator):
-        threading.Thread.__init__(self)
-        self.q = queue.Queue()
-        self.poll = ArcusMCPoll(node_allocator)
-        self.poll.start()
-        self.node_allocator = node_allocator
-
-    def run(self):
-        arcuslog(self, "worker start")
-
-        while True:
-            op = self.q.get()
-            if self.node_allocator.shutdown == True:
-                arcuslog(self, "worker done")
-                self.poll.join()
-                return
-
-            if op == None:  # maybe shutdown
-                continue
-
-            arcuslog(
-                self,
-                "get operation %s(%s:%s) from %s"
-                % (op.request, op.callback, hex(id(op)), op.node),
-            )
-            node = op.node
-
-            try:
-                node.process_request(op.request)
-            except Exception as e:
-                arcuslog(self, "operation failed: %s" % str(e))
-                op.set_result(e)
-
-    def register_node(self, node):
-        self.poll.register_node(node)
-
-
-class ArcusMCNodeAllocator:
-    def __init__(self, transcoder):
-        self.transcoder = transcoder
-        self.worker = ArcusMCWorker(self)
-        self.worker.start()
-        self.shutdown = False
-
-    def alloc(self, addr, name):
-        ret = ArcusMCNode(addr, name, self.transcoder, self)
-        self.worker.register_node(ret)
-        return ret
-
-    def join(self):
-        self.worker.join()
