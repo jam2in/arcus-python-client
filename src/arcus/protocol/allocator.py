@@ -18,10 +18,6 @@
 
 """Cache-node construction and worker lifecycle."""
 
-import queue
-import threading
-
-from ..exceptions import ArcusNodeConnectionException
 from .node import ArcusMCNode
 from .worker import ArcusMCWorker
 
@@ -40,9 +36,9 @@ class ArcusMCNodeAllocator:
         self.transcoder = transcoder
         self.auth_user = auth_user
         self.auth_pass = auth_pass
+        self.shutdown = False
         self.worker = ArcusMCWorker(self)
         self.worker.start()
-        self.shutdown = False
 
     def alloc(self, addr, name):
         ret = ArcusMCNode(

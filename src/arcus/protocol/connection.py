@@ -51,8 +51,8 @@ class Connection(object):
             arcuslog(self, "initial connect failed: %s" % e)
 
     def connect(self):
-        if self.socket:
-            disconnect()
+        if self.socket is not None:
+            self.disconnect()
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
@@ -72,9 +72,7 @@ class Connection(object):
                 self.socket.settimeout(None)
             except Exception as e:
                 self.disconnect()
-                raise ArcusNodeConnectionException(
-                    "SASL authentication failed: %s" % e
-                )
+                raise ArcusNodeConnectionException("SASL authentication failed: %s" % e)
 
         return self.socket
 
@@ -123,14 +121,18 @@ class Connection(object):
             self.send_request(b"sasl auth %d\r\n%s" % (len(message), message))
 
     def disconnect(self):
-        if self.socket:
-            self.socket.close()
-            self.socket = None
+        sock = self.socket
+        self.socket = None
+        self.buffer = b""
+        if sock is not None:
+            sock.close()
 
     def disconnected(self):
         return self.socket == None
 
     def send_request(self, request):
+        if self.disconnected():
+            raise ArcusNodeConnectionException("node is disconnected")
         arcuslog(self, "send_request: ", request + b"\r\n")
         self.socket.sendall(request + b"\r\n")
 
@@ -146,6 +148,8 @@ class Connection(object):
             if index >= 0:
                 break
 
+            if self.disconnected():
+                raise ArcusNodeConnectionException("node is disconnected")
             data = self.socket.recv(4096)
             arcuslog(self, 'sock recv: (%d): "' % len(data), data)
 
@@ -161,8 +165,12 @@ class Connection(object):
         return buf[:index]
 
     def recv(self, rlen):
+        if rlen < 0:
+            raise ArcusProtocolException(f"invalid response length: {rlen}")
         buf = self.buffer
         while len(buf) < rlen:
+            if self.disconnected():
+                raise ArcusNodeConnectionException("node is disconnected")
             foo = self.socket.recv(max(rlen - len(buf), 4096))
 
             if not foo:  # None or b"" (connection closed by peer)
