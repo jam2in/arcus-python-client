@@ -1,5 +1,6 @@
 include AUTHORS ChangeLog
 recursive-include tests *.py
+recursive-include tools *.py *.md
 exclude AGENTS.md
 prune plan
 prune .github
