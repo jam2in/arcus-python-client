@@ -38,11 +38,16 @@ Repository = "https://github.com/jam2in/arcus-python-client"
 Issues = "https://github.com/jam2in/arcus-python-client/issues"
 
 [tool.setuptools]
-py-modules = ["arcus", "arcus_mc_node"]
+package-dir = {"" = "src"}
+py-modules = ["arcus_mc_node"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["arcus", "arcus.*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-norecursedirs = ["integration"]
+norecursedirs = ["integration", "legacy"]
 addopts = "--strict-config --strict-markers --import-mode=importlib"
 markers = ["integration: requires an isolated Arcus and ZooKeeper service on Linux"]
 timeout = 60
