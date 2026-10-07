@@ -23,166 +23,168 @@ import re
 from threading import Lock
 from datetime import datetime
 
+
 def log(*arg):
-	str = '[%s] ' % datetime.now()
+    str = "[%s] " % datetime.now()
 
-	for a in arg:
-		str += a.__str__()
+    for a in arg:
+        str += a.__str__()
 
-	print(str)
+    print(str)
+
 
 class Manager:
-	def __init__(self):
-		self.zk_list = []
-		self.lock = Lock()
+    def __init__(self):
+        self.zk_list = []
+        self.lock = Lock()
 
-	def append(self, zk):
-		self.zk_list.append(zk)
+    def append(self, zk):
+        self.zk_list.append(zk)
 
-	def sync(self):
-		self.lock.acquire()
-		log('Sync start')
+    def sync(self):
+        self.lock.acquire()
+        log("Sync start")
 
-		# read children
-		for zk in self.zk_list:
-			zk.read()
+        # read children
+        for zk in self.zk_list:
+            zk.read()
 
-		# make new ehphemeral node
-		for zk1 in self.zk_list:
-			for zk2 in self.zk_list:
-				if zk1 == zk2:
-					continue
+        # make new ehphemeral node
+        for zk1 in self.zk_list:
+            for zk2 in self.zk_list:
+                if zk1 == zk2:
+                    continue
 
-				# make node
-				for node in zk1.ephemerals:
-					if node in zk2.ephemerals:
-						log('Error: Duplicated ephemeral  %s%s - %s' % (zk1.name, zk1.path, node))
-						continue
-					
-					if node not in zk2.nonephemerals:
-						log('Create: %s%s - %s' % (zk1.name, zk1.path, node))
-						zk2.create(node, False)
+                # make node
+                for node in zk1.ephemerals:
+                    if node in zk2.ephemerals:
+                        log(
+                            "Error: Duplicated ephemeral  %s%s - %s"
+                            % (zk1.name, zk1.path, node)
+                        )
+                        continue
 
+                    if node not in zk2.nonephemerals:
+                        log("Create: %s%s - %s" % (zk1.name, zk1.path, node))
+                        zk2.create(node, False)
 
-		# delete old nonehphemeral node
-		for zk1 in self.zk_list:
-			for node in zk1.nonephemerals:
-				flag = False
-				for zk2 in self.zk_list:
-					if zk1 == zk2:
-						continue
+        # delete old nonehphemeral node
+        for zk1 in self.zk_list:
+            for node in zk1.nonephemerals:
+                flag = False
+                for zk2 in self.zk_list:
+                    if zk1 == zk2:
+                        continue
 
-					if node in zk2.ephemerals:
-						flag = True
-						break
+                    if node in zk2.ephemerals:
+                        flag = True
+                        break
 
-				if flag == False:
-					# delete abnormal node
-					log('Delete: %s%s - %s is abnormal' % (zk1.name, zk1.path, node))
-					zk1.delete(node)
+                if flag == False:
+                    # delete abnormal node
+                    log("Delete: %s%s - %s is abnormal" % (zk1.name, zk1.path, node))
+                    zk1.delete(node)
 
+        # view result & watch children again
+        log("Sync result")
+        for zk in self.zk_list:
+            zk.read(self.watch_children)
 
-		# view result & watch children again
-		log('Sync result')
-		for zk in self.zk_list:
-			zk.read(self.watch_children)
+        log("Sync done")
+        self.lock.release()
 
-		log('Sync done')
-		self.lock.release()
-		
-	def watch_children(self, event):
-		log('watch children called: ', event)
-		self.sync()
-
+    def watch_children(self, event):
+        log("watch children called: ", event)
+        self.sync()
 
 
 class Zookeeper:
-	def __init__(self, zk):
-		zk, path = zk.split('/', 1)
-		self.zk = KazooClient(zk)
-		self.zk.start()
-		self.name = zk
-		self.path = '/' + path
+    def __init__(self, zk):
+        zk, path = zk.split("/", 1)
+        self.zk = KazooClient(zk)
+        self.zk.start()
+        self.name = zk
+        self.path = "/" + path
 
-		self.children = []
-		self.ephemerals = []
-		self.nonephemerals = []
+        self.children = []
+        self.ephemerals = []
+        self.nonephemerals = []
 
-		# safety check
-		if '/arcus/cache_list/' not in self.path:
-			log('invalid zk node path (should include /arcus/cache_list)')
-			sys.exit(0)
+        # safety check
+        if "/arcus/cache_list/" not in self.path:
+            log("invalid zk node path (should include /arcus/cache_list)")
+            sys.exit(0)
 
-	def is_ephemeral(self, path):
-		data, stat = self.zk.get(path)
-		return stat.owner_session_id != None
+    def is_ephemeral(self, path):
+        data, stat = self.zk.get(path)
+        return stat.owner_session_id != None
 
-	def read(self, watch = None):
-		while True:
-			try: 
-				self.children = []
-				self.ephemerals = []
-				self.nonephemerals = []
+    def read(self, watch=None):
+        while True:
+            try:
+                self.children = []
+                self.ephemerals = []
+                self.nonephemerals = []
 
-				self.children = self.zk.get_children(self.path, watch)
+                self.children = self.zk.get_children(self.path, watch)
 
-				for child in self.children:
-					if self.is_ephemeral(self.path + '/' + child):
-						self.ephemerals.append(child)
-					else:
-						self.nonephemerals.append(child)
-							
-				log('read zk(%s%s)' % (self.name, self.path))
-				log('\tchildren(%d): ' % len(self.children), self.children)
-				log('\tephemeral(%d): ' % len(self.ephemerals), self.ephemerals)
-				log('\tnonephemeral(%d): ' % len(self.nonephemerals), self.nonephemerals)
-			except kazoo.exceptions.NoNodeError as e:
-				log('Exception occur(%s):' % self.name)
-				log(e)
-				log('\tpath:', self.path + '/' + child)
-				log('\tchildren(%d): ' % len(self.children), self.children)
-				log('\tephemeral(%d): ' % len(self.ephemerals), self.ephemerals)
-				log('\tnonephemeral(%d): ' % len(self.nonephemerals), self.nonephemerals)
+                for child in self.children:
+                    if self.is_ephemeral(self.path + "/" + child):
+                        self.ephemerals.append(child)
+                    else:
+                        self.nonephemerals.append(child)
 
-				children = self.zk.get_children(self.path, watch)
-				log('\treal children(%d): ' % len(children), children)
+                log("read zk(%s%s)" % (self.name, self.path))
+                log("\tchildren(%d): " % len(self.children), self.children)
+                log("\tephemeral(%d): " % len(self.ephemerals), self.ephemerals)
+                log(
+                    "\tnonephemeral(%d): " % len(self.nonephemerals), self.nonephemerals
+                )
+            except kazoo.exceptions.NoNodeError as e:
+                log("Exception occur(%s):" % self.name)
+                log(e)
+                log("\tpath:", self.path + "/" + child)
+                log("\tchildren(%d): " % len(self.children), self.children)
+                log("\tephemeral(%d): " % len(self.ephemerals), self.ephemerals)
+                log(
+                    "\tnonephemeral(%d): " % len(self.nonephemerals), self.nonephemerals
+                )
 
-				log('######### RETRY ###########')
-				continue
-			break
+                children = self.zk.get_children(self.path, watch)
+                log("\treal children(%d): " % len(children), children)
 
-				
-	def create(self, path, ephemeral=False):
-		return self.zk.create(self.path + '/' + path, ephemeral = ephemeral)
+                log("######### RETRY ###########")
+                continue
+            break
 
-	def delete(self, path):
-		return self.zk.delete(self.path + '/' + path)
+    def create(self, path, ephemeral=False):
+        return self.zk.create(self.path + "/" + path, ephemeral=ephemeral)
+
+    def delete(self, path):
+        return self.zk.delete(self.path + "/" + path)
 
 
-	
+if __name__ == "__main__":
+    # for test
+    if len(sys.argv) == 1:
+        # add here for test like below
+        # sys.argv.append('zk1.addr.com:17288/arcus/cache_list/cloud_1')
+        # sys.argv.append('zk2.addr.com:17288/arcus/cache_list/cloud_2')
+        pass
 
+    if len(sys.argv) < 3:
+        print("usage: python3 zk_sync.py [ZKADDR:PORT/PATH/CLOUD]+")
+        sys.exit(0)
 
-if __name__ == '__main__':
-	# for test
-	if len(sys.argv) == 1:
-		# add here for test like below
-		#sys.argv.append('zk1.addr.com:17288/arcus/cache_list/cloud_1')
-		#sys.argv.append('zk2.addr.com:17288/arcus/cache_list/cloud_2')
-		pass
+    mgr = Manager()
+    for arg in sys.argv[1:]:
+        zk = Zookeeper(arg)
+        mgr.append(zk)
 
-	if len(sys.argv) < 3:
-		print("usage: python3 zk_sync.py [ZKADDR:PORT/PATH/CLOUD]+")
-		sys.exit(0)
+    log("sync manager start")
+    mgr.sync()
 
-	mgr = Manager()
-	for arg in sys.argv[1:]:
-		zk = Zookeeper(arg)
-		mgr.append(zk)
-	
-	log("sync manager start")
-	mgr.sync()
-
-	'''
+    """
 	print('############## Create start ###############')
 	for i in range(0, 100):
 		zk.create('node%d' % i, True)
@@ -210,12 +212,10 @@ if __name__ == '__main__':
 	for i in range(0, 100):
 		zk.delete('node%d' % i)
 	print('############## Delete done ###############')
-	'''
+	"""
 
-	while True:
-		log('running...')
-		time.sleep(10)
+    while True:
+        log("running...")
+        time.sleep(10)
 
-	log('sync manager done')
-
-
+    log("sync manager done")
