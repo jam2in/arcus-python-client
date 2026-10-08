@@ -83,7 +83,7 @@ class Connection(object):
             data = self.socket.recv(4096)
             arcuslog(self, 'sock recv: (%d): "' % len(data), data)
 
-            if data == None:
+            if not data:  # None or b"" (connection closed by peer)
                 self.disconnect()
                 raise ArcusNodeConnectionException("connection lost")
 
