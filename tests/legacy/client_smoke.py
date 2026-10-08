@@ -20,7 +20,7 @@
 # sys.argv[1] : connection url for Arcus cloud (zookeeper address:port)
 # sys.argv[2] : Arcus cloud service code
 #
-# USAGE: python3 test.py your.arcuscloud.com:11223 service_code
+# USAGE: python3 tests/legacy/client_smoke.py your.arcuscloud.com:11223 service_code
 #
 
 from arcus import *
