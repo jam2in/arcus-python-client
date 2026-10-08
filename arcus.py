@@ -627,7 +627,7 @@ class ArcusOperation:
             return self.result
 
         if timeout > 0:
-            result = self.q.get(False, timeout)
+            result = self.q.get(timeout=timeout)
         else:
             result = self.q.get()
 
