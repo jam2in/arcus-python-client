@@ -1,0 +1,7 @@
+include AUTHORS ChangeLog
+recursive-include tests *.py
+exclude AGENTS.md
+prune plan
+prune .github
+prune build
+prune dist
