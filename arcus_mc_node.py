@@ -23,7 +23,7 @@ import os
 import re
 import threading
 from threading import Lock
-import select
+import selectors
 
 from arcus import *
 
@@ -1160,37 +1160,60 @@ class EflagFilter:
 class ArcusMCPoll(threading.Thread):
     def __init__(self, node_allocator):
         threading.Thread.__init__(self)
-        self.epoll = select.epoll()
+        self.selector = selectors.DefaultSelector()
         self.sock_node_map = {}
         self.node_allocator = node_allocator
 
     def run(self):
-        arcuslog(self, "epoll start")
+        arcuslog(self, "selector start")
 
         while True:
-            events = self.epoll.poll(2)
+            events = self.selector.select(timeout=2)
 
             if self.node_allocator.shutdown == True:
-                arcuslog(self, "epoll out")
+                arcuslog(self, "selector out")
+                self.selector.close()
                 return
 
-            for fileno, event in events:
-                if event & select.EPOLLIN:
-                    node = self.sock_node_map[fileno]
+            for key, mask in events:
+                node = key.data
+                if mask & selectors.EVENT_READ:
+                    if not node.ops and self._peer_closed(key.fileobj):
+                        arcuslog(self, "connection closed by peer: ", node)
+                        self.selector.unregister(key.fileobj)
+                        del self.sock_node_map[key.fd]
+                        node.disconnect()
+                        continue
                     node.do_op()
 
-                if event & select.EPOLLHUP:
-                    print("EPOLL HUP")
-                    self.epoll.unregister(fileno)
-                    node = self.sock_node_map[fileno]
-                    node.disconnect()
-                    del self.sock_node_map[fileno]
+    def _peer_closed(self, sock):
+        try:
+            return sock.recv(1, socket.MSG_PEEK) == b""
+        except BlockingIOError:
+            return False
+        except OSError:
+            return True
 
     def register_node(self, node):
-        self.epoll.register(node.get_fileno(), select.EPOLLIN | select.EPOLLHUP)
-
-        arcuslog(self, "regist node: ", node.get_fileno(), node)
-        self.sock_node_map[node.get_fileno()] = node
+        sock = node.handle.socket
+        if sock is None:
+            return
+        fileno = sock.fileno()
+        if fileno == -1:
+            return
+        # unregister first in case of reconnect (also drops a stale entry with the same fd)
+        try:
+            self.selector.unregister(sock)
+        except (KeyError, ValueError):
+            pass
+        try:
+            self.selector.register(sock, selectors.EVENT_READ, node)
+        except (KeyError, ValueError, OSError) as e:
+            # socket closed concurrently, selector closed on shutdown, or kernel refused
+            arcuslog(self, "register node failed: ", fileno, node, e)
+            return
+        arcuslog(self, "regist node: ", fileno, node)
+        self.sock_node_map[fileno] = node
 
 
 class ArcusMCWorker(threading.Thread):
