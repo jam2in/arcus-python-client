@@ -67,10 +67,13 @@ class ArcusMCNode:
         self.handle.disconnect()
 
         # clear existing operation
-        for op in self.ops:
-            op.set_invalid()
-
+        self.lock.acquire()
+        ops = self.ops
         self.ops = []
+        self.lock.release()
+
+        for op in ops:
+            op.set_invalid()
 
     def disconnect_all(self):  # shutdown
         self.node_allocator.shutdown = True
@@ -590,26 +593,33 @@ class ArcusMCNode:
         op = self.ops.pop(0)
         self.lock.release()
 
-        try:
-            ret = op.callback()
-        except Exception as e:
-            arcuslog(self, "do op failed: %s" % str(e))
-            ret = e
-
-        op.set_result(ret)
+        if not self._run_op(op):
+            return
 
         while self.handle.hasline():  # remaining jobs
             self.lock.acquire()
             op = self.ops.pop(0)
             self.lock.release()
 
-            try:
-                ret = op.callback()
-            except Exception as e:
-                arcuslog(self, "do op failed: %s" % str(e))
-                ret = e
+            if not self._run_op(op):
+                return
 
-            op.set_result(ret)
+    def _run_op(self, op):
+        try:
+            ret = op.callback()
+        except ArcusNodeConnectionException as e:
+            # connection lost: fail this op and invalidate the pending ones,
+            # so their responses are not matched to requests sent after reconnect
+            arcuslog(self, "do op failed: %s" % str(e))
+            op.set_result(e)
+            self.disconnect()
+            return False
+        except Exception as e:
+            arcuslog(self, "do op failed: %s" % str(e))
+            ret = e
+
+        op.set_result(ret)
+        return True
 
     def _recv_ok(self):
         line = self.handle.readline()

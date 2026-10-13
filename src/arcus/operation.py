@@ -44,7 +44,7 @@ class ArcusOperation:
         )
 
     def has_result(self):
-        return self.result != None or self.q.empty() == False
+        return self.result != self or self.q.empty() == False
 
     def set_result(self, result):
         self.q.put(result)
@@ -54,7 +54,7 @@ class ArcusOperation:
             return False
 
         self.invalid = True
-        self.q.put(None)  # wake up blocked callers.
+        self.q.put(self)  # wake up blocked callers.
         return True
 
     def get_result(self, timeout=0):

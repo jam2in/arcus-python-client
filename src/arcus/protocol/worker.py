@@ -108,6 +108,9 @@ class ArcusMCWorker(threading.Thread):
             if op == None:  # maybe shutdown
                 continue
 
+            if op.invalid:  # invalidated by disconnect before being sent
+                continue
+
             arcuslog(
                 self,
                 "get operation %s(%s:%s) from %s"
