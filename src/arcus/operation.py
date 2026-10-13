@@ -18,6 +18,7 @@
 
 """Thread-safe asynchronous operation results and aggregation."""
 
+import heapq
 import time
 from concurrent.futures import (
     CancelledError,
@@ -27,8 +28,8 @@ from concurrent.futures import (
 )
 
 from .exceptions import (
+    ArcusCompositeException,
     ArcusException,
-    ArcusNodeConnectionException,
     ArcusTimeoutException,
 )
 
@@ -46,6 +47,8 @@ class ArcusOperation:
     def __repr__(self):
         if not self._future.done():
             result = "pending"
+        elif self._future.cancelled():
+            result = "cancelled"
         else:
             error = self._future.exception()
             value = error if error is not None else self._future.result()
@@ -79,126 +82,106 @@ class ArcusOperation:
         return self._future.result()
 
 
-class ArcusOperationList:
-    def __init__(self, cmd):
-        self.ops = []
+class ArcusMultiOperation:
+    def __init__(self, cmd, operations):
         self.cmd = cmd
-        self.result = None
-        self.missed_key = None
-        self.invalid = False
-
-        self.noreply = False
-        self.pipe = False
+        self.ops = tuple(operations)
+        self._future = Future()
 
     def __repr__(self):
-        return "<ArcusOperationList[%s] result: %s>" % (
-            hex(id(self)),
-            repr(self.get_result()),
-        )
+        if not self._future.done():
+            result = "pending"
+        elif self._future.cancelled():
+            result = "cancelled"
+        else:
+            error = self._future.exception()
+            value = error if error is not None else self._future.result()[0]
+            result = repr(value)
 
-    def add_op(self, op):
-        self.ops.append(op)
+        return f"<ArcusMultiOperation[{hex(id(self))}] result: {result}>"
 
     def has_result(self):
-        if self.result != None:
-            return True
+        return self._future.done() or all(op.has_result() for op in self.ops)
 
-        for a in self.ops:
-            if not a.has_result():
-                return False
+    def set_exception(self, error):
+        try:
+            self._future.set_exception(error)
+        except InvalidStateError:
+            return
 
-        return True
+        for op in self.ops:
+            op.set_exception(error)
 
-    def set_result(self, result):
-        assert False
-        pass
+    def get_result(self, timeout=None):
+        try:
+            self._complete_result(timeout)
+            self._future.exception(timeout=timeout)
+        except TimeoutError:
+            raise ArcusTimeoutException() from None
+        except CancelledError:
+            raise ArcusException("operation cancelled") from None
 
-    def set_invalidate(self):
-        if self.has_result():
-            return False  # already done
+        return self._future.result()[0]
 
-        self.invalid = True
+    def get_missed_key(self, timeout=None):
+        self.get_result(timeout=timeout)
+        return self._future.result()[1]
 
-        # invalidate all ops and wake up blockers.
-        for a in self.ops:
-            a.set_exception(ArcusNodeConnectionException())
+    def _complete_result(self, timeout):
+        if self._future.done():
+            return
 
-        return True
+        deadline = time.monotonic() + timeout if timeout is not None else None
+        child_results = []
+        missed_keys = []
+        errors = []
 
-    def get_missed_key(self, timeout=0):
-        if self.missed_key != None:
-            return self.missed_key
+        for op in self.ops:
+            remaining = (
+                None if deadline is None else max(0, deadline - time.monotonic())
+            )
 
-        self.get_result(timeout)
-        return self.missed_key
+            try:
+                op._future.exception(timeout=remaining)
+            except TimeoutError:
+                if self._future.done():
+                    return
+                raise
+            except CancelledError:
+                errors.append(ArcusException("operation cancelled"))
+                continue
 
-    def get_result(self, timeout=0):
-        if self.result != None:
-            return self.result
+            try:
+                result, missed = op.get_result()
+                child_results.append(result)
+                missed_keys.extend(missed)
+            except Exception as error:  # noqa: BLE001 - preserve child failures
+                errors.append(error)
 
-        tmp_result = []
-        missed_key = []
-        if timeout > 0:
-            start_time = time.time()
-            end_time = start_time + timeout
+        try:
+            if errors:
+                if len(errors) == 1:
+                    self._future.set_exception(errors[0])
+                else:
+                    self._future.set_exception(ArcusCompositeException(errors))
+                return
 
-            for a in self.ops:
-                curr_time = time.time()
-                remain_time = end_time - curr_time
-                if remain_time <= 0:
-                    raise ArcusTimeoutException()
+            try:
+                combined = self._merge_results(child_results, missed_keys)
+            except Exception as e:  # noqa: BLE001 - preserve merge failures
+                self._future.set_exception(e)
+            else:
+                self._future.set_result(combined)
+        except InvalidStateError:
+            return
 
-                ret, miss = a.get_result(remain_time)
-                tmp_result.append(ret)
-                missed_key += miss
-        else:
-            for a in self.ops:
-                ret, miss = a.get_result()
-                tmp_result.append(ret)
-                missed_key += miss
-
+    def _merge_results(self, child_results, missed_keys):
         if self.cmd == "bop mget":
-            result = {}
-            for a in tmp_result:
-                result.update(a)
+            merged = {}
+            for result in child_results:
+                merged.update(result)
 
         else:  # bop smget
-            length = len(tmp_result)
+            merged = list(heapq.merge(*child_results))
 
-            # empty
-            if length <= 0:
-                return []
-
-            # merge sort
-            result = []
-            while True:
-                # remove empty list
-                while len(tmp_result[0]) == 0:
-                    tmp_result.pop(0)
-                    if len(tmp_result) == 0:  # all done
-                        if self.result == None and self.invalid == True:
-                            raise ArcusNodeConnectionException(
-                                "current async result is unavailable because Arcus node is disconnected now"
-                            )
-                        missed_key.sort()
-                        self.result = result
-                        self.missed_key = missed_key
-                        return self.result
-
-                min = tmp_result[0][0]
-                idx = 0
-                for i in range(0, len(tmp_result)):
-                    if len(tmp_result[i]) and tmp_result[i][0] < min:
-                        min = tmp_result[i][0]
-                        idx = i
-
-                result.append(tmp_result[idx].pop(0))
-
-        if self.result == None and self.invalid == True:
-            raise ArcusNodeConnectionException(
-                "current async result is unavailable because Arcus node is disconnected now"
-            )
-        missed_key.sort()
-        self.result = result
-        self.missed_key = missed_key
-        return self.result
+        return merged, sorted(missed_keys)

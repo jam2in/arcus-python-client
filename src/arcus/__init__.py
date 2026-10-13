@@ -5,6 +5,7 @@ from .client import Arcus
 from .collections import ArcusList, ArcusSet
 from .exceptions import (
     ArcusException,
+    ArcusCompositeException,
     ArcusProtocolException,
     ArcusNodeException,
     ArcusNodeSocketException,
@@ -20,7 +21,7 @@ from .exceptions import (
     CollectionHexFormat,
     FilterInvalid,
 )
-from .operation import ArcusOperation, ArcusOperationList
+from .operation import ArcusOperation, ArcusMultiOperation
 from .routing import ArcusKetemaHash, ArcusLocator, ArcusPoint
 from .transcoder import ArcusTranscoder
 from .protocol import ArcusMCNodeAllocator, EflagFilter
@@ -30,6 +31,7 @@ __all__ = [
     "ArcusList",
     "ArcusSet",
     "ArcusException",
+    "ArcusCompositeException",
     "ArcusProtocolException",
     "ArcusNodeException",
     "ArcusNodeSocketException",
@@ -45,7 +47,7 @@ __all__ = [
     "CollectionHexFormat",
     "FilterInvalid",
     "ArcusOperation",
-    "ArcusOperationList",
+    "ArcusMultiOperation",
     "ArcusKetemaHash",
     "ArcusPoint",
     "ArcusLocator",

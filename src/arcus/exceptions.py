@@ -24,6 +24,15 @@ class ArcusException(Exception):
         super().__init__(msg)
 
 
+class ArcusCompositeException(ArcusException):
+    def __init__(self, exceptions):
+        self.exceptions = tuple(exceptions)
+        messages = ", ".join(str(e) or type(e).__name__ for e in self.exceptions)
+        super().__init__(
+            f"Multiple exceptions ({len(self.exceptions)}) reported: {messages}"
+        )
+
+
 class ArcusProtocolException(ArcusException):
     def __init__(self, msg="Arcus protocol error"):
         super().__init__(msg)
