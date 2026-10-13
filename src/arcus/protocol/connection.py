@@ -25,7 +25,6 @@ import time
 from .._logging import arcuslog
 from ..exceptions import (
     ArcusNodeConnectionException,
-    ArcusNodeSocketException,
     ArcusProtocolException,
 )
 
@@ -100,10 +99,10 @@ class Connection(object):
         while len(buf) < rlen:
             foo = self.socket.recv(max(rlen - len(buf), 4096))
 
-            if foo == None:
-                raise ArcusNodeSocketException(
-                    "Read %d bytes, expecting %d, read returned 0 length bytes"
-                    % (len(buf), rlen)
+            if not foo:  # None or b"" (connection closed by peer)
+                self.disconnect()
+                raise ArcusNodeConnectionException(
+                    "connection lost: read %d bytes, expecting %d" % (len(buf), rlen)
                 )
 
             buf += foo
