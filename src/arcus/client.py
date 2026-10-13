@@ -20,7 +20,7 @@
 
 from ._logging import arcuslog
 from .collections import ArcusList, ArcusSet
-from .operation import ArcusOperationList
+from .operation import ArcusMultiOperation
 from .protocol.allocator import ArcusMCNodeAllocator
 from .routing import ArcusLocator
 from .transcoder import ArcusTranscoder
@@ -191,34 +191,28 @@ class Arcus:
 
         for key in key_list:
             node = self.locator.get_node(key)
-            if node not in nodes:
-                nodes[node] = [key]
-            else:
-                nodes[node].append(key)
+            nodes.setdefault(node, []).append(key)
 
-        op_list = ArcusOperationList("bop mget")
-        for node in nodes:
-            op = node.bop_mget(nodes[node], range, filter, offset, count)
-            op_list.add_op(op)
+        operations = [
+            node.bop_mget(keys, range, filter, offset, count)
+            for node, keys in nodes.items()
+        ]
 
-        return op_list
+        return ArcusMultiOperation("bop mget", operations)
 
     def bop_smget(self, key_list, range, filter=None, offset=None, count=2000):
         nodes = {}
 
         for key in key_list:
             node = self.locator.get_node(key)
-            if node not in nodes:
-                nodes[node] = [key]
-            else:
-                nodes[node].append(key)
+            nodes.setdefault(node, []).append(key)
 
-        op_list = ArcusOperationList("bop smget")
-        for node in nodes:
-            op = node.bop_smget(nodes[node], range, filter, offset, count)
-            op_list.add_op(op)
+        operations = [
+            node.bop_smget(keys, range, filter, offset, count)
+            for node, keys in nodes.items()
+        ]
 
-        return op_list
+        return ArcusMultiOperation("bop smget", operations)
 
     def list_alloc(self, key, flags, exptime=0, cache_time=0):
         self.lop_create(key, flags, exptime)
