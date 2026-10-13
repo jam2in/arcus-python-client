@@ -78,6 +78,10 @@ class Arcus:
         node = self.locator.get_node(key)
         return node.cas(key, val, cas_id, time)
 
+    def getattr(self, key):
+        node = self.locator.get_node(key)
+        return node.getattr(key)
+
     def lop_create(self, key, flags, exptime=0, noreply=False, attr_map=None):
         node = self.locator.get_node(key)
         return node.lop_create(key, flags, exptime, noreply, attr_map)

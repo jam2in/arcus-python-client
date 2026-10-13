@@ -136,6 +136,10 @@ class ArcusMCNode:
 
         op = self.add_op("stats", full_cmd, self._recv_stat)
 
+    def getattr(self, key):
+        full_cmd = bytes("getattr %s" % key, "utf-8")
+        return self.add_op("getattr", full_cmd, self._recv_getattr)
+
     def lop_create(self, key, flags, exptime=0, noreply=False, attr=None):
         return self._coll_create("lop create", key, flags, exptime, noreply, attr)
 
@@ -610,6 +614,24 @@ class ArcusMCNode:
                 ret = e
 
             op.set_result(ret)
+
+    def _recv_getattr(self):
+        attrs = {}
+        while True:
+            line = self.handle.readline()
+            if line == b"END":
+                return attrs
+
+            if line == b"NOT_FOUND":
+                return None
+
+            if line[:5] != b"ATTR ":
+                raise ArcusProtocolException(
+                    "invalid response for getattr: %s" % line
+                )
+
+            k, v = line[5:].decode("utf-8").split("=", 1)
+            attrs[k.strip()] = v.strip()
 
     def _recv_ok(self):
         line = self.handle.readline()
