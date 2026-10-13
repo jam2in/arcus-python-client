@@ -20,70 +20,75 @@
 
 
 class ArcusException(Exception):
-    def __init__(self, msg):
-        self.msg = msg
+    def __init__(self, msg="Arcus client error"):
+        super().__init__(msg)
 
 
 class ArcusProtocolException(ArcusException):
-    def __init__(self, msg):
-        self.msg = msg
+    def __init__(self, msg="Arcus protocol error"):
+        super().__init__(msg)
 
 
 class ArcusNodeException(ArcusException):
-    def __init__(self, msg):
-        self.msg = msg
+    def __init__(self, msg="Arcus node error"):
+        super().__init__(msg)
 
 
 class ArcusNodeSocketException(ArcusNodeException):
-    def __init__(self, msg):
-        self.msg = msg
+    def __init__(self, msg="Arcus node socket error"):
+        super().__init__(msg)
 
 
 class ArcusNodeConnectionException(ArcusNodeException):
-    def __init__(self, msg):
-        self.msg = msg
+    def __init__(self, msg="Node disconnected"):
+        super().__init__(msg)
 
 
 class ArcusListException(ArcusException):
-    def __init__(self, msg):
-        self.msg = msg
+    def __init__(self, msg="Arcus list operation failed"):
+        super().__init__(msg)
+
+
+class ArcusTimeoutException(ArcusException):
+    def __init__(self, msg="Timed out waiting for the operation result"):
+        super().__init__(msg)
 
 
 class CollectionException(ArcusException):
-    def __init__(self, msg):
-        self.msg = msg
+    def __init__(self, msg="Collection operation failed"):
+        super().__init__(msg)
 
 
 class CollectionType(CollectionException):
-    def __init__(self, msg="collection type mismatch"):
-        self.msg = msg
+    def __init__(self, msg="Collection type mismatch"):
+        super().__init__(msg)
 
 
 class CollectionExist(CollectionException):
-    def __init__(self, msg="collection already exits"):
-        self.msg = msg
+    def __init__(self, msg="Collection already exists"):
+        super().__init__(msg)
 
 
 class CollectionIndex(CollectionException):
-    def __init__(self, msg="invalid index or range"):
-        self.msg = msg
+    def __init__(self, msg="Invalid index or range"):
+        super().__init__(msg)
 
 
 class CollectionOverflow(CollectionException):
-    def __init__(self, msg="collection overflow"):
-        self.msg = msg
+    def __init__(self, msg="Collection overflow"):
+        super().__init__(msg)
 
 
 class CollectionUnreadable(CollectionException):
-    def __init__(self, msg="collection is unreadable"):
-        self.msg = msg
+    def __init__(self, msg="Collection is unreadable"):
+        super().__init__(msg)
 
 
 class CollectionHexFormat(CollectionException):
-    def __init__(self, msg="invalid hex string format"):
-        self.msg = msg
+    def __init__(self, msg="Invalid hex string format"):
+        super().__init__(msg)
 
 
 class FilterInvalid(CollectionException):
-    def __init__(self, msg="invalid fiter expression"):
-        self.msg = msg
+    def __init__(self, msg="Invalid filter expression"):
+        super().__init__(msg)
