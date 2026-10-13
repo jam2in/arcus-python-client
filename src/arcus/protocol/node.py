@@ -583,7 +583,7 @@ class ArcusMCNode:
     def do_op(self):
         self.lock.acquire()
         if len(self.ops) <= 0:
-            arcuslog("ops empty (%s)" % self.addr)
+            arcuslog(self, "ops empty (%s)" % self.addr)
             self.lock.release()
             return
 
@@ -593,7 +593,7 @@ class ArcusMCNode:
         try:
             ret = op.callback()
         except Exception as e:
-            arcuslog("do op failed: %s" % str(e))
+            arcuslog(self, "do op failed: %s" % str(e))
             ret = e
 
         op.set_result(ret)
@@ -606,7 +606,7 @@ class ArcusMCNode:
             try:
                 ret = op.callback()
             except Exception as e:
-                arcuslog("do op failed: %s" % str(e))
+                arcuslog(self, "do op failed: %s" % str(e))
                 ret = e
 
             op.set_result(ret)
