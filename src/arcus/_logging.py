@@ -18,29 +18,28 @@
 
 """Optional diagnostic logging shared by client components."""
 
-import datetime
+import logging
 
-g_log = False
+_logger = logging.getLogger("arcus")
+_logger.addHandler(logging.NullHandler())
 
 
 def enable_log(flag=True):
-    global g_log
-    g_log = flag
+    _logger.setLevel(logging.DEBUG if flag else logging.WARNING)
 
 
 def arcuslog(caller, *param):
-    global g_log
+    if not _logger.isEnabledFor(logging.DEBUG):
+        return
 
-    if g_log:
-        str = ""
-        if caller:
-            str = "[%s - %s(%s)] " % (
-                datetime.datetime.now(),
-                caller.__class__.__name__,
-                hex(id(caller)),
-            )
-
-        for p in param:
-            str += repr(p)
-
-        print(str)
+    message = " ".join(str(value) for value in param)
+    if caller is None:
+        _logger.debug("%s", message, stacklevel=2)
+    else:
+        _logger.debug(
+            "[%s(%s)] %s",
+            type(caller).__name__,
+            hex(id(caller)),
+            message,
+            stacklevel=2,
+        )

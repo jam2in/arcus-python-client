@@ -132,9 +132,9 @@ class ArcusTranscoder:
                 unpickler = pickle.Unpickler(file)
                 val = unpickler.load()
             except Exception as e:
-                arcuslog("Pickle error: %s\n" % e)
+                arcuslog(self, "Pickle error: %s\n" % e)
                 return None
         else:
-            arcuslog("unknown flags on get: %x\n" % flags)
+            arcuslog(self, "unknown flags on get: %x\n" % flags)
 
         return val
