@@ -18,11 +18,19 @@
 
 """Thread-safe asynchronous operation results and aggregation."""
 
-import queue
 import time
-from threading import Event, Lock
+from concurrent.futures import (
+    CancelledError,
+    Future,
+    InvalidStateError,
+    TimeoutError,
+)
 
-from .exceptions import ArcusNodeConnectionException
+from .exceptions import (
+    ArcusException,
+    ArcusNodeConnectionException,
+    ArcusTimeoutException,
+)
 
 
 class ArcusOperation:
@@ -30,52 +38,45 @@ class ArcusOperation:
         self.node = node
         self.request = request
         self.callback = callback
-        self.q = queue.Queue(1)
-        self.result = self  # self.result == self : not received, self.result == None : receive None
-        self.invalid = False
-
         self.noreply = False
         self.pipe = False
 
+        self._future = Future()
+
     def __repr__(self):
-        return "<ArcusOperation[%s] result: %s>" % (
-            hex(id(self)),
-            repr(self.get_result()),
-        )
+        if not self._future.done():
+            result = "pending"
+        else:
+            error = self._future.exception()
+            value = error if error is not None else self._future.result()
+            result = repr(value)
+
+        return f"<ArcusOperation[{hex(id(self))}] result: {result}>"
 
     def has_result(self):
-        return self.result != self or self.q.empty() == False
+        return self._future.done()
 
     def set_result(self, result):
-        self.q.put(result)
+        try:
+            self._future.set_result(result)
+        except InvalidStateError:
+            return
 
-    def set_invalid(self):
-        if self.has_result():
-            return False
+    def set_exception(self, error):
+        try:
+            self._future.set_exception(error)
+        except InvalidStateError:
+            return
 
-        self.invalid = True
-        self.q.put(self)  # wake up blocked callers.
-        return True
+    def get_result(self, timeout=None):
+        try:
+            self._future.exception(timeout=timeout)
+        except TimeoutError:
+            raise ArcusTimeoutException() from None
+        except CancelledError:
+            raise ArcusException("operation cancelled") from None
 
-    def get_result(self, timeout=0):
-        if self.result != self:
-            return self.result
-
-        if timeout > 0:
-            result = self.q.get(timeout=timeout)
-        else:
-            result = self.q.get()
-
-        if result == self and self.invalid == True:
-            raise ArcusNodeConnectionException(
-                "current async result is unavailable because Arcus node is disconnected now"
-            )
-
-        if isinstance(result, Exception):
-            raise result
-
-        self.result = result
-        return result
+        return self._future.result()
 
 
 class ArcusOperationList:
@@ -102,8 +103,8 @@ class ArcusOperationList:
         if self.result != None:
             return True
 
-        for a in ops:
-            if a.has_result() == False:
+        for a in self.ops:
+            if not a.has_result():
                 return False
 
         return True
@@ -119,8 +120,8 @@ class ArcusOperationList:
         self.invalid = True
 
         # invalidate all ops and wake up blockers.
-        for a in ops:
-            a.set_invalidate()
+        for a in self.ops:
+            a.set_exception(ArcusNodeConnectionException())
 
         return True
 
@@ -139,13 +140,13 @@ class ArcusOperationList:
         missed_key = []
         if timeout > 0:
             start_time = time.time()
-            end_time = start_tume + timeout
+            end_time = start_time + timeout
 
             for a in self.ops:
                 curr_time = time.time()
                 remain_time = end_time - curr_time
-                if remain_time < 0:
-                    raise Queue.Empty()
+                if remain_time <= 0:
+                    raise ArcusTimeoutException()
 
                 ret, miss = a.get_result(remain_time)
                 tmp_result.append(ret)

@@ -18,9 +18,6 @@
 
 """Cache-node state and the Arcus text protocol."""
 
-import socket
-import threading
-import time
 from threading import Lock
 
 from .._logging import arcuslog
@@ -75,7 +72,7 @@ class ArcusMCNode:
         self.lock.release()
 
         for op in ops:
-            op.set_invalid()
+            op.set_exception(ArcusNodeConnectionException())
 
     def disconnect_all(self):  # shutdown
         self.node_allocator.shutdown = True
@@ -334,6 +331,7 @@ class ArcusMCNode:
 
         if noreply:  # or pipe
             # don't need to receive response, set_result now
+            op.noreply = True
             self.node_allocator.worker.q.put(op)
             op.set_result(True)
         else:
@@ -616,15 +614,16 @@ class ArcusMCNode:
         except ArcusNodeConnectionException as e:
             # connection lost: fail this op and invalidate the pending ones,
             # so their responses are not matched to requests sent after reconnect
-            arcuslog(self, "do op failed: %s" % str(e))
-            op.set_result(e)
+            arcuslog(self, f"do op failed: {str(e)}")
+            op.set_exception(e)
             self.disconnect()
             return False
         except Exception as e:
-            arcuslog(self, "do op failed: %s" % str(e))
-            ret = e
+            arcuslog(self, f"do op failed: {str(e)}")
+            op.set_exception(e)
+        else:
+            op.set_result(ret)
 
-        op.set_result(ret)
         return True
 
     def _recv_getattr(self):
@@ -638,9 +637,7 @@ class ArcusMCNode:
                 return None
 
             if line[:5] != b"ATTR ":
-                raise ArcusProtocolException(
-                    "invalid response for getattr: %s" % line
-                )
+                raise ArcusProtocolException("invalid response for getattr: %s" % line)
 
             k, v = line[5:].decode("utf-8").split("=", 1)
             attrs[k.strip()] = v.strip()

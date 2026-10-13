@@ -105,10 +105,10 @@ class ArcusMCWorker(threading.Thread):
                 self.poll.join()
                 return
 
-            if op == None:  # maybe shutdown
+            if op is None:  # maybe shutdown
                 continue
 
-            if op.invalid:  # invalidated by disconnect before being sent
+            if op.has_result() and not op.noreply:
                 continue
 
             arcuslog(
@@ -122,7 +122,7 @@ class ArcusMCWorker(threading.Thread):
                 node.process_request(op.request)
             except Exception as e:
                 arcuslog(self, "operation failed: %s" % str(e))
-                op.set_result(e)
+                op.set_exception(e)
 
     def register_node(self, node):
         self.poll.register_node(node)
