@@ -43,14 +43,16 @@ class ArcusMCNode:
     worker = None
     shutdown = False
 
-    def __init__(self, addr, name, transcoder, node_allocator):
+    def __init__(
+        self, addr, name, transcoder, node_allocator, auth_user=None, auth_pass=None
+    ):
         # mandatory files
         self.addr = addr
         self.name = name
         self.in_use = False
         self.transcoder = transcoder
 
-        self.handle = Connection(addr)
+        self.handle = Connection(addr, auth_user, auth_pass)
         self.ops = []
         self.lock = Lock()  # for ordering worker.q and ops
 

@@ -29,7 +29,15 @@ from .transcoder import ArcusTranscoder
 
 
 class Arcus:
-    def __init__(self, *, zk_hosts, service_code, transcoder=None):
+    def __init__(
+        self,
+        *,
+        zk_hosts,
+        service_code,
+        transcoder=None,
+        auth_user=None,
+        auth_pass=None,
+    ):
         if not zk_hosts:
             raise ValueError("zk_hosts is required")
 
@@ -39,7 +47,7 @@ class Arcus:
         if transcoder is None:
             transcoder = ArcusTranscoder()
 
-        allocator = ArcusMCNodeAllocator(transcoder)
+        allocator = ArcusMCNodeAllocator(transcoder, auth_user, auth_pass)
         self.locator = ArcusLocator(allocator)
 
         try:
