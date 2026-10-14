@@ -20,16 +20,34 @@
 
 import time
 
+from ._logging import arcuslog
 from .collections import ArcusList, ArcusSet
 from .operation import ArcusOperationList
+from .protocol.allocator import ArcusMCNodeAllocator
+from .routing import ArcusLocator
+from .transcoder import ArcusTranscoder
 
 
 class Arcus:
-    def __init__(self, locator):
-        self.locator = locator
+    def __init__(self, *, zk_hosts, service_code, transcoder=None):
+        if not zk_hosts:
+            raise ValueError("zk_hosts is required")
 
-    def connect(self, addr, code):
-        self.locator.connect(addr, code)
+        if not service_code:
+            raise ValueError("service_code is required")
+
+        if transcoder is None:
+            transcoder = ArcusTranscoder()
+
+        allocator = ArcusMCNodeAllocator(transcoder)
+        self.locator = ArcusLocator(allocator)
+
+        try:
+            self.locator.connect(zk_hosts, service_code)
+        except Exception:
+            self.locator.disconnect()
+            arcuslog(self, "connection failed")
+            raise
 
     def disconnect(self):
         self.locator.disconnect()
