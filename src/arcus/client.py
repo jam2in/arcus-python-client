@@ -22,7 +22,7 @@ from ._logging import arcuslog
 from .collections import ArcusList, ArcusSet
 from .operation import ArcusMultiOperation
 from .protocol.allocator import ArcusMCNodeAllocator
-from .routing import ArcusLocator
+from .routing import ArcusLocator, ArcusReplLocator, is_repl_cluster
 from .transcoder import ArcusTranscoder
 
 
@@ -45,8 +45,13 @@ class Arcus:
         if transcoder is None:
             transcoder = ArcusTranscoder()
 
+        if is_repl_cluster(zk_hosts, service_code):
+            locator_class = ArcusReplLocator
+        else:
+            locator_class = ArcusLocator
+
         allocator = ArcusMCNodeAllocator(transcoder, auth_user, auth_pass)
-        self.locator = ArcusLocator(allocator)
+        self.locator = locator_class(allocator)
 
         try:
             self.locator.connect(zk_hosts, service_code)
