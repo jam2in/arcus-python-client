@@ -27,14 +27,27 @@ from .worker import ArcusMCWorker
 
 
 class ArcusMCNodeAllocator:
-    def __init__(self, transcoder):
+    def __init__(self, transcoder, auth_user=None, auth_pass=None):
+        if auth_user:
+            try:
+                import scramp
+            except ImportError:
+                raise ImportError(
+                    "scramp is required for SASL authentication: "
+                    "pip install 'arcus-python-client[sasl]'"
+                )
+
         self.transcoder = transcoder
+        self.auth_user = auth_user
+        self.auth_pass = auth_pass
         self.worker = ArcusMCWorker(self)
         self.worker.start()
         self.shutdown = False
 
     def alloc(self, addr, name):
-        ret = ArcusMCNode(addr, name, self.transcoder, self)
+        ret = ArcusMCNode(
+            addr, name, self.transcoder, self, self.auth_user, self.auth_pass
+        )
         self.worker.register_node(ret)
         return ret
 

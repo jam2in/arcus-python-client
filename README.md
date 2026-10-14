@@ -19,6 +19,22 @@ python -m pip install .
 This installs the `arcus` package, the `arcus_mc_node` compatibility module and
 their Kazoo dependency.
 
+To connect to an Arcus cluster that requires SASL (SCRAM-SHA-256) authentication,
+install the `sasl` extra and pass the credentials to `Arcus`:
+
+```sh
+python -m pip install '.[sasl]'
+```
+
+```python
+client = Arcus(
+    zk_hosts="zk.example.com:2181",
+    service_code="service_code",
+    auth_user="user",
+    auth_pass="password",
+)
+```
+
 ## Use
 
 After installation, import `arcus` and `arcus_mc_node` as before.

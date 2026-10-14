@@ -30,16 +30,25 @@ from ..exceptions import (
 
 
 class Connection(object):
-    def __init__(self, host):
+    sasl_timeout = 5  # seconds to wait for each SASL handshake reply
+
+    def __init__(self, host, auth_user=None, auth_pass=None):
         ip, port = host.split(":")
         self.ip = ip
         self.port = int(port)
         self.address = (self.ip, self.port)
+        self.auth_user = auth_user
+        self.auth_pass = auth_pass
 
         self.socket = None
         self.buffer = b""
 
-        self.connect()
+        try:
+            self.connect()
+        except ArcusNodeConnectionException as e:
+            # SASL failed: stay disconnected, the next request reconnects and
+            # reports the error to its caller
+            arcuslog(self, "initial connect failed: %s" % e)
 
     def connect(self):
         if self.socket:
@@ -54,7 +63,64 @@ class Connection(object):
             self.disconnect()
 
         self.buffer = b""
+
+        if self.socket and self.auth_user:
+            try:
+                # the handshake reads on the worker thread, so never block forever
+                self.socket.settimeout(self.sasl_timeout)
+                self._sasl_auth()
+                self.socket.settimeout(None)
+            except Exception as e:
+                self.disconnect()
+                raise ArcusNodeConnectionException(
+                    "SASL authentication failed: %s" % e
+                )
+
         return self.socket
+
+    def _sasl_auth(self):
+        # SCRAM-SHA-256 over 'sasl mech' / 'sasl auth', see tools/arcus_util.py
+        from scramp import ScramClient
+
+        self.send_request(b"sasl mech")
+        result = self.readline().decode("utf-8")
+        if not result.startswith("SASL_MECH"):
+            return  # server does not require authentication
+
+        mechanism = "SCRAM-SHA-256"
+        if mechanism not in result.split():
+            raise ArcusProtocolException("no %s mechanism: %s" % (mechanism, result))
+
+        scram_client = ScramClient([mechanism], self.auth_user, self.auth_pass)
+        message = scram_client.get_client_first().encode("utf-8")
+        self.send_request(
+            b"sasl auth %s %d\r\n%s" % (mechanism.encode(), len(message), message)
+        )
+
+        is_server_first = True
+        server_verified = False
+        while True:
+            result = self.readline().decode("utf-8")
+            if result.startswith("SASL_OK"):
+                if not server_verified:
+                    # mutual auth: the server must prove it knows the password
+                    raise ArcusProtocolException("SASL_OK before server-final")
+                return
+
+            if not result.startswith("SASL_CONTINUE"):
+                raise ArcusProtocolException(result)
+
+            server_message = self.readline().decode("utf-8")
+            if is_server_first:
+                is_server_first = False
+                scram_client.set_server_first(server_message)
+                message = scram_client.get_client_final().encode("utf-8")
+            else:
+                scram_client.set_server_final(server_message)
+                server_verified = True
+                message = b""
+
+            self.send_request(b"sasl auth %d\r\n%s" % (len(message), message))
 
     def disconnect(self):
         if self.socket:
