@@ -25,7 +25,6 @@ from threading import Lock
 from kazoo.client import KazooClient
 
 from ._logging import arcuslog
-from .exceptions import ArcusNodeConnectionException, ArcusProtocolException
 
 
 class ArcusKetemaHash:
@@ -88,10 +87,9 @@ class ArcusPoint:
 
 class ArcusLocator:
     def __init__(self, node_allocator):
-        # config
+        self.zk = None
         self.hash_method = ArcusKetemaHash()
 
-        # init
         self.lock = Lock()
         self.node_list = []
         self.addr_node_map = {}
@@ -103,12 +101,12 @@ class ArcusLocator:
         self.zk = KazooClient(hosts=addr)
         self.zk.start()
 
-        self.zoo_path = "/arcus/cache_list/" + code
-        arcuslog(self, "zoo keeper get path: " + self.zoo_path)
-        data, stat = self.zk.get(self.zoo_path)
+        zoo_path = "/arcus/cache_list/" + code
+        arcuslog(self, "zoo keeper get path: " + zoo_path)
+        data, stat = self.zk.get(zoo_path)
         arcuslog(self, "zoo keeper node info with stat: ", data, stat)
 
-        children = self.zk.get_children(self.zoo_path, watch=self.watch_children)
+        children = self.zk.get_children(path=zoo_path, watch=self.watch_children)
         self.hash_nodes(children)
 
     def disconnect(self):

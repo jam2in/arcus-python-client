@@ -23,21 +23,17 @@
 # USAGE: python3 tests/legacy/client_smoke.py your.arcuscloud.com:11223 service_code
 #
 
-from arcus import *
-from arcus_mc_node import ArcusMCNodeAllocator
-from arcus_mc_node import EflagFilter
-import datetime, time, sys
+import datetime
+import sys
 
-# enable_log()
+from arcus import *
+from arcus_mc_node import EflagFilter
 
 timeout = 20
 
-
 # client which use arcus memcached node & default arcus transcoder
-client = Arcus(ArcusLocator(ArcusMCNodeAllocator(ArcusTranscoder())))
-
 print("### connect to client")
-client.connect(sys.argv[1], sys.argv[2])
+client = Arcus(zk_hosts=sys.argv[1], service_code=sys.argv[2])
 
 
 #####################################################################################################
