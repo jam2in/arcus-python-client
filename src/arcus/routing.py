@@ -85,6 +85,27 @@ class ArcusPoint:
         return "(%d:%s)" % (self.hash, self.node)
 
 
+class ArcusReplicaGroup:
+    def __init__(self, group_name):
+        self.group_name = group_name
+        self.master_node = None
+        self.slave_node = None
+        self.in_use = False
+
+    def get_master(self):
+        return self.master_node
+
+    def get_slave(self):
+        return self.slave_node if self.slave_node else self.master_node
+
+    def __repr__(self):
+        return "<ArcusReplicaGroup[%s] M=%s S=%s>" % (
+            self.group_name,
+            self.master_node.addr if self.master_node else None,
+            self.slave_node.addr if self.slave_node else None,
+        )
+
+
 class ArcusLocator:
     def __init__(self, node_allocator):
         self.zk = None
@@ -93,6 +114,7 @@ class ArcusLocator:
         self.lock = Lock()
         self.node_list = []
         self.addr_node_map = {}
+        self.group_map = {}
         self.node_allocator = node_allocator
 
     def connect(self, addr, code):
@@ -101,7 +123,10 @@ class ArcusLocator:
         self.zk = KazooClient(hosts=addr)
         self.zk.start()
 
-        zoo_path = "/arcus/cache_list/" + code
+        # an enterprise (replication) cluster registers under /arcus_repl
+        zoo_path = "/arcus_repl/cache_list/" + code
+        if not self.zk.exists(zoo_path):
+            zoo_path = "/arcus/cache_list/" + code
         arcuslog(self, "zoo keeper get path: " + zoo_path)
         data, stat = self.zk.get(zoo_path)
         arcuslog(self, "zoo keeper node info with stat: ", data, stat)
@@ -114,6 +139,7 @@ class ArcusLocator:
             node.disconnect_all()
 
         self.addr_node_map = {}
+        self.group_map = {}
         self.node_list = []
         self.zk.stop()
         self.node_allocator.join()
@@ -128,26 +154,67 @@ class ArcusLocator:
         self.node_list = []
         for node in self.addr_node_map.values():
             node.in_use = False
+        for group in self.group_map.values():
+            group.in_use = False
 
         # update live nodes
+        group_children = {}
         for child in children:
+            if "^" in child:
+                # enterprise: <group>^<M|S>^<ip:port>-<hostname>, applied per group below
+                group_name, role, child = child.split("^", 2)
+                addr, _, name = child.partition("-")
+                group_children.setdefault(group_name, []).append((role, addr, name))
+                continue
+
             lst = child.split("-")
             addr, name = lst[:2]
 
-            if addr in self.addr_node_map:
-                self.addr_node_map[addr].in_use = True
-                node = self.addr_node_map[addr]
-            else:
-                # new node
-                node = self.node_allocator.alloc(addr, name)
-                self.addr_node_map[addr] = node
-                self.addr_node_map[addr].in_use = True
+            node = self.__use_node(addr, name)
 
             hash_list = self.hash_method.hash(node.addr)
             arcuslog(self, "hash_lists of node(%s): %s" % (node.addr, hash_list))
 
             for hash in hash_list:
                 point = ArcusPoint(hash, node)
+                self.node_list.append(point)
+
+        for group_name, members in group_children.items():
+            group = self.group_map.get(group_name)
+            if not self.__valid_group(group_name, members):
+                # failover/switchover in progress: keep the previous roles and nodes
+                # until the cluster settles, like the java client
+                if group:
+                    group.in_use = True
+                    for node in (group.master_node, group.slave_node):
+                        if node:
+                            node.in_use = True
+                continue
+
+            if group is None:
+                group = ArcusReplicaGroup(group_name)
+                self.group_map[group_name] = group
+
+            group.in_use = True
+            group.master_node = None
+            group.slave_node = None
+            for role, addr, name in members:
+                node = self.__use_node(addr, name)
+                if role == "M":
+                    group.master_node = node
+                else:
+                    group.slave_node = node
+
+        # remove dead groups, then hash live groups by group name
+        for group_name in [g for g, grp in self.group_map.items() if not grp.in_use]:
+            del self.group_map[group_name]
+
+        for group_name, group in self.group_map.items():
+            hash_list = self.hash_method.hash(group_name)
+            arcuslog(self, "hash_lists of group(%s): %s" % (group_name, hash_list))
+
+            for hash in hash_list:
+                point = ArcusPoint(hash, group)
                 self.node_list.append(point)
 
         # sort list
@@ -166,6 +233,27 @@ class ArcusLocator:
             del self.addr_node_map[node.addr]
 
         self.lock.release()
+
+    def __use_node(self, addr, name):
+        if addr in self.addr_node_map:
+            node = self.addr_node_map[addr]
+        else:
+            # new node
+            node = self.node_allocator.alloc(addr, name)
+            self.addr_node_map[addr] = node
+
+        node.in_use = True
+        return node
+
+    def __valid_group(self, group_name, members):
+        # one master, at most one slave and no duplicated address
+        masters = [member for member in members if member[0] == "M"]
+        addrs = set(member[1] for member in members)
+        if len(masters) == 1 and len(members) <= 2 and len(addrs) == len(members):
+            return True
+
+        arcuslog(self, "invalid group(%s): %s" % (group_name, members))
+        return False
 
     def watch_children(self, event):
         arcuslog(self, "watch children called: ", event)
@@ -187,7 +275,11 @@ class ArcusLocator:
         point = self.node_list[idx]
         self.lock.release()
 
-        return point.node
+        node = point.node
+        if isinstance(node, ArcusReplicaGroup):
+            return node.get_master()
+
+        return node
 
     def __hash_key(self, key):
         bkey = bytes(key, "utf-8")
