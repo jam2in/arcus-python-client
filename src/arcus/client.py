@@ -18,8 +18,6 @@
 
 """Public cache API and request routing facade."""
 
-import time
-
 from ._logging import arcuslog
 from .collections import ArcusList, ArcusSet
 from .operation import ArcusOperationList
@@ -102,7 +100,7 @@ class Arcus:
 
     def cas(self, key, val, cas_id, exptime=0):
         node = self.locator.get_node(key)
-        return node.cas(key, val, cas_id, time)
+        return node.cas(key, val, cas_id, exptime)
 
     def getattr(self, key):
         node = self.locator.get_node(key)
@@ -186,7 +184,7 @@ class Arcus:
 
     def bop_decr(self, key, bkey, value, noreply=False, pipe=False):
         node = self.locator.get_node(key)
-        return node.bop_incr(key, bkey, value, noreply, pipe)
+        return node.bop_decr(key, bkey, value, noreply, pipe)
 
     def bop_mget(self, key_list, range, filter=None, offset=None, count=50):
         nodes = {}

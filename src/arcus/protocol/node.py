@@ -102,7 +102,7 @@ class ArcusMCNode:
         return self._set("set", key, val, exptime)
 
     def cas(self, key, val, cas_id, exptime=0):
-        return self._cas(key, "cas", val, cas_id, exptime)
+        return self._cas("cas", key, val, cas_id, exptime)
 
     def incr(self, key, value=1):
         return self._incr_decr("incr", key, value)
@@ -367,12 +367,10 @@ class ArcusMCNode:
 
     def _cas(self, cmd, key, val, cas_id, exptime=0):
         flags, len, value = self.transcoder.encode(val)
-        if flags == None:
+        if flags is None:
             return 0
 
-        full_cmd = bytes(
-            "%s %s %d %d %d %d\r\n" % (cmd, key, flags, exptime, len, cas_id), "utf-8"
-        )
+        full_cmd = f"{cmd} {key} {flags} {exptime} {len} {int(cas_id)}\r\n".encode()
         full_cmd += value
 
         op = self.add_op(cmd, full_cmd, self._recv_set)
