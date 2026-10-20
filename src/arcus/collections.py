@@ -214,7 +214,7 @@ class ArcusSet:
         self.next_refresh = time.time() + cache_time
 
     def __len__(self):
-        if self.cache != None:
+        if self.cache is not None:
             if time.time() >= self.next_refresh:
                 self.cache = self.arcus.sop_get(self.key).get_result()
                 self.next_refresh = time.time() + self.cache_time
@@ -223,13 +223,13 @@ class ArcusSet:
             return len(self.arcus.sop_get(self.key).get_result())
 
     def __contains__(self, value):
-        if self.cache != None and time.time() < self.next_refresh:
+        if self.cache is not None and time.time() < self.next_refresh:
             return value in self.cache  # do not fetch all for cache when time over
 
         return self.arcus.sop_exist(self.key, value).get_result()
 
     def __iter__(self):
-        if self.cache != None:
+        if self.cache is not None:
             if time.time() >= self.next_refresh:
                 self.cache = self.arcus.sop_get(self.key).get_result()
                 self.next_refresh = time.time() + self.cache_time
@@ -238,13 +238,14 @@ class ArcusSet:
             return iter(self.arcus.sop_get(self.key).get_result())
 
     def add(self, value):
-        if self.cache != None:
-            self.cache[value] = True
+        result = self.arcus.sop_insert(self.key, value).get_result()
+        if result is True and self.cache is not None:
+            self.cache.add(value)
 
-        return self.arcus.sop_insert(self.key, value).get_result()
+        return result
 
     def invalidate(self):
-        if self.cache != None:
+        if self.cache is not None:
             try:
                 self.cache = self.arcus.sop_get(self.key).get_result()
             except Exception:
@@ -253,7 +254,7 @@ class ArcusSet:
             self.next_refresh = time.time() + self.cache_time
 
     def __repr__(self):
-        if self.cache != None:
+        if self.cache is not None:
             if time.time() >= self.next_refresh:
                 self.cache = self.arcus.sop_get(self.key).get_result()
                 self.next_refresh = time.time() + self.cache_time
